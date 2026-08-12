@@ -60,7 +60,13 @@ jobs:
       # fetch-depth: 0 and fetch-tags are required, not tidy. actions/checkout
       # fetches a single commit by default, and at depth 1 the tests' upstream
       # half (git show <tag>:<path>), git archive and git format-patch all fail.
-      - uses: actions/checkout@v7
+      # Deliberately pinned one patch behind (v7.0.1 is current) to establish by
+      # observation whether Dependabot maintains SHA-pinned actions and rewrites
+      # the trailing version comment. GitHub's docs state neither. If a bump PR
+      # arrives for this line, SHA pinning and automated updates coexist and the
+      # remaining seven refs follow; if none arrives, SHA-pinned actions are
+      # maintained by hand and that is a deliberate trade, not an oversight.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           fetch-tags: true
