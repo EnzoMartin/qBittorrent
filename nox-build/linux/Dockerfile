@@ -86,16 +86,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     qt6-tools-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- libtorrent v2.0.13 ------------------------------------------------
-# v2.0.13 is the minimum: it fixed the SSL peer-cert prefix-match vulnerability
-# (strncmp → exact string_view equality at verify_peer_cert). Do NOT lower this
-# floor without re-reading libtorrent src/torrent.cpp at the candidate tag.
+# ---- libtorrent --------------------------------------------------------
+# Supplied from nox-build/pins.json by the caller, with no defaults. A default
+# here would be a second copy of the version, and the drift it permits is
+# undetectable in one direction: the runtime floor asserts >=, so a Dockerfile
+# bumped without the pin file passes while the floor it is checked against
+# silently weakens.
+ARG LT_TAG
+ARG LT_COMMIT
+
 # --recurse-submodules is required, not an optimisation: `deps/try_signal` is a
 # submodule and CMakeLists.txt:548 lists try_signal.cpp in the torrent-rasterbar
 # sources, so a plain clone fails at configure with "Cannot find source file".
-RUN git clone --depth 1 --branch v2.0.13 \
-    --recurse-submodules --shallow-submodules \
-    https://github.com/arvidn/libtorrent.git /src/libtorrent
+#
+# The tag is fetched and the commit asserted, because a tag is movable and this
+# one decides whether SSL peer certificates are compared exactly or by prefix.
+RUN test -n "$LT_TAG" -a -n "$LT_COMMIT" \
+      || { echo "ERROR: LT_TAG and LT_COMMIT must be passed as build args, from nox-build/pins.json."; exit 1; } \
+    && git clone --depth 1 --branch "$LT_TAG" \
+       --recurse-submodules --shallow-submodules \
+       https://github.com/arvidn/libtorrent.git /src/libtorrent \
+    && ACTUAL=$(git -C /src/libtorrent rev-parse HEAD) \
+    && [ "$ACTUAL" = "$LT_COMMIT" ] \
+       || { echo "ERROR: $LT_TAG resolves to $ACTUAL but pins.json records $LT_COMMIT. The tag moved."; exit 1; }
 
 WORKDIR /src/libtorrent
 # CMAKE_INSTALL_PREFIX=/usr/local: installs to /usr/local/lib (arch-independent).
