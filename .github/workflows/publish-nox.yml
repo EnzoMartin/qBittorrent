@@ -1,0 +1,705 @@
+# Publish qbittorrent-nox: a Linux container image and a Windows bundle, each
+# with its own Corresponding Source pack.
+#
+# ONE workflow, not two. Two workflows firing on the same tag would race to
+# create one Release, and neither's completeness assertion could know whether the
+# other had finished. A single needs: DAG removes that by construction and yields
+# one terminal assertion covering the whole release. runs-on is per-job, so a
+# Windows job beside a Linux job in one file is ordinary.
+#
+# A workflow_dispatch is a REHEARSAL and is measure-only by construction: every
+# publishing step carries a ref predicate that is false on a dispatch, so the run
+# compiles, tests and measures everything while writing nothing public.
+#
+# Guards are STEP-level, never job-level. GitHub skips every job that needs: a
+# skipped job, so a job-level guard on create-release would skip both publish
+# jobs and the assertion with it -- the run would execute only `verify`, report
+# success, and the rehearsal would silently measure nothing.
+
+name: publish-nox
+
+on:
+  push:
+    tags: ['release-*-mod.*']
+  workflow_dispatch:
+
+# cancel-in-progress is false, and that is a correctness requirement rather than
+# a preference. Cancelling a superseded TEST build wastes nothing; cancelling a
+# PUBLISHING run between the image push and the source upload leaves a Release
+# carrying a binary with no Corresponding Source -- and the assertion that would
+# have caught it dies inside the cancelled run.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write     # gh release create / upload
+  packages: write     # GHCR push
+
+env:
+  GH_TOKEN: ${{ github.token }}        # gh needs a token env var; it is not exported automatically
+  GH_REPO: ${{ github.repository }}    # the checkout-less jobs have no git dir to resolve a repo from
+  # Lowercase literal. The OCI repository-name grammar admits no uppercase, and
+  # ${{ github.repository_owner }} expands to mixed case, so the push would fail
+  # on an invalid reference. Asserted before the push rather than trusted.
+  IMAGE: ghcr.io/enzomartin/qbittorrent-nox
+  LT_TAG: v2.0.13
+  QBT_WEBAPI_MIN: '2.15.1'
+  # Static libraries, dynamic CRT (/MD). MSVC_RUNTIME_DYNAMIC=ON uses /MD, and
+  # mixing /MT from x64-windows-static with /MD is undefined CRT behaviour.
+  VCPKG_TRIPLET: x64-windows-static-md
+
+jobs:
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Post-condition tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      upstream_tag: ${{ steps.tag.outputs.upstream_tag }}
+    steps:
+      # fetch-depth: 0 and fetch-tags are required, not tidy. actions/checkout
+      # fetches a single commit by default, and at depth 1 the tests' upstream
+      # half (git show <tag>:<path>), git archive and git format-patch all fail.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Derived by EVENT. On a tag push ref_name is release-X-mod.N, so the
+      # -mod.N suffix is stripped. On a dispatch ref_name is the BRANCH, which
+      # carries no -mod.N -- stripping one would leave hardened/release-X, the
+      # tests' upstream half would resolve to the branch HEAD, every
+      # present-at-tag assertion would fail, and every job needing this one
+      # would skip. Any other shape fails loudly rather than guessing.
+      - name: Derive the upstream tag
+        id: tag
+        run: |
+          REF='${{ github.ref_name }}'
+          if [ '${{ github.event_name }}' = 'push' ]; then
+            case "$REF" in
+              *-mod.*) TAG="${REF%-mod.*}" ;;
+              *) echo "::error::tag '$REF' does not match release-<upstream>-mod.<n>"; exit 1 ;;
+            esac
+          else
+            case "$REF" in
+              hardened/*) TAG="${REF#hardened/}" ;;
+              *) echo "::error::branch '$REF' is not a hardened/<upstream-tag> branch"; exit 1 ;;
+            esac
+          fi
+          echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Upstream tag: $TAG"
+
+      - name: Run the post-condition tests
+        env:
+          UPSTREAM_TAG: ${{ steps.tag.outputs.upstream_tag }}
+        run: python3 -m unittest discover -s nox-build/tests -v
+
+  # ---------------------------------------------------------------------------
+  create-release:
+    name: Create the draft release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # View first, create only if absent. NOT `create || view`: gh's duplicate
+      # guard is `if hasAssets && !opts.Draft`, so a draft with no assets skips
+      # it entirely, the API mints a SECOND draft on the same tag, and the ||
+      # fallback never fires because create succeeded -- leaving every later
+      # view/upload/edit resolving an ambiguous target.
+      #
+      # Created as a draft. assert-release-complete is the only thing that
+      # un-drafts it, so there is no state in which a partially assembled
+      # release is public.
+      - name: Create the release if it does not exist
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; leaving it alone."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Upstream tag \`${{ needs.verify.outputs.upstream_tag }}\`, modification level from the tag suffix.
+
+          Delete-only source modifications: the search-plugin controller registration and the autorun \`setPreferences\` handlers are removed. Both are remote-code-execution surfaces reachable from the WebUI API and neither is disableable by a build flag.
+
+          See \`MODIFICATIONS.md\` for the exact scope, the bound on each claim, and how to reproduce."
+          fi
+
+  # ---------------------------------------------------------------------------
+  publish-linux:
+    name: Linux image
+    needs: [verify, create-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The login is NOT implied by permissions: packages: write. That grants
+      # the token the right; it does not hand the token to the Docker daemon,
+      # and push: true cannot reach GHCR without this step.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert the image reference is lowercase
+        run: |
+          [ "$IMAGE" = "$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" ] \
+            || { echo "::error::IMAGE '$IMAGE' is not lowercase; the OCI repository-name grammar admits no uppercase"; exit 1; }
+
+      # Built and loaded locally first, so the runtime assertions below run
+      # against the image BEFORE it can reach the registry.
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nox-build/linux/Dockerfile
+          load: true
+          push: false
+          tags: nox-engine:candidate
+
+      # The Windows half asserts its floors; without this the Linux half would
+      # assert nothing, and the only 404 proof of the scope removal would be a
+      # developer running it by hand against a local tag.
+      #
+      # The 404 must be observed AUTHENTICATED. doProcessRequest throws
+      # ForbiddenHTTPError before the controller lookup, so an unauthenticated
+      # probe answers 403 against a pristine engine too: a 403 here is
+      # INCONCLUSIVE, never a pass. The 200 on app/webapiVersion in the same
+      # session is what makes the 404 mean anything.
+      #
+      # The API key is qbt_ + exactly 28 characters. Utils::APIKey::isValid
+      # requires the prefix and a total length of exactly 32; a short key is
+      # silently ignored, no session is created, and every call answers 403 --
+      # which surfaces as a readiness timeout, not as an auth error.
+      #
+      # On Linux the config file is qBittorrent.conf, not .ini: QSettings picks
+      # the name by platform.
+      - name: Assert the built image's runtime floors
+        run: |
+          set -euo pipefail
+          KEY='qbt_cicicicicicicicicicicicicici'
+          PROF="$(mktemp -d)"
+          mkdir -p "$PROF/qBittorrent/config"
+          cat > "$PROF/qBittorrent/config/qBittorrent.conf" <<CONF
+          [LegalNotice]
+          Accepted=true
+
+          [Preferences]
+          WebUI\\Enabled=true
+          WebUI\\Address=0.0.0.0
+          WebUI\\Port=18765
+          WebUI\\LocalHostAuth=true
+          WebUI\\Username=ci
+          WebUI\\APIKey=$KEY
+          CONF
+
+          CID=$(docker run -d -p 18765:18765 -v "$PROF:/profile" nox-engine:candidate \
+            --profile=/profile --webui-port=18765 --confirm-legal-notice)
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+
+          for _ in $(seq 1 60); do
+            if curl -fsS -H "Authorization: Bearer $KEY" \
+                 http://127.0.0.1:18765/api/v2/app/webapiVersion >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          WEBAPI=$(curl -fsS -H "Authorization: Bearer $KEY" \
+            http://127.0.0.1:18765/api/v2/app/webapiVersion)
+          echo "webapiVersion = $WEBAPI"
+          [ -n "$WEBAPI" ] || { echo "::error::no webapiVersion; the key was rejected and the 404 below would be meaningless"; exit 1; }
+          printf '%s\n%s\n' "$QBT_WEBAPI_MIN" "$WEBAPI" | sort -V -C \
+            || { echo "::error::webapiVersion $WEBAPI is below the floor $QBT_WEBAPI_MIN"; exit 1; }
+
+          LT=$(curl -fsS -H "Authorization: Bearer $KEY" \
+            http://127.0.0.1:18765/api/v2/app/buildInfo | sed -n 's/.*"libtorrent":"\([^"]*\)".*/\1/p')
+          echo "libtorrent = $LT"
+          [ -n "$LT" ] || { echo "::error::buildInfo did not report a libtorrent version"; exit 1; }
+          printf '%s\n%s\n' "${LT_TAG#v}" "$LT" | sort -V -C \
+            || { echo "::error::libtorrent $LT is below the security floor ${LT_TAG#v} (SSL peer-cert exact match)"; exit 1; }
+
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
+            http://127.0.0.1:18765/api/v2/search/plugins)
+          echo "search/plugins = $CODE"
+          case "$CODE" in
+            404) echo "PASS: the search scope resolves to no controller" ;;
+            403) echo "::error::403 is INCONCLUSIVE -- authentication did not take. Never record this as a pass."; exit 1 ;;
+            *)   echo "::error::search/plugins returned $CODE; the registration survived somewhere the source scan did not look"; exit 1 ;;
+          esac
+
+      - name: Push the image
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nox-build/linux/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          # org.opencontainers.image.source is load-bearing beyond metadata: a
+          # package inherits its repository's permissions automatically only if
+          # linked BEFORE publish. Connecting one afterwards retains its existing
+          # permissions instead. The first push is the only cheap moment.
+          #
+          # documentation discharges a licence duty. GPLv3 §6(d) requires "clear
+          # directions next to the object code"; for an image on a registry that
+          # is the image's own metadata and its package page, not a README.
+          #
+          # licenses carries GPL-3.0-or-later because BINARY distribution is v3+
+          # per upstream COPYING. SPDX has no listed identifier for qBittorrent's
+          # OpenSSL linking exception, so the label cannot express it -- the
+          # exception's text travels in COPYING inside the source pack, and the
+          # documentation label leads a reader there. Do not invent a WITH clause.
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.source=https://github.com/EnzoMartin/qBittorrent
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.documentation=https://github.com/EnzoMartin/qBittorrent/releases/tag/${{ github.ref_name }}
+
+      # The manifest is generated from the FINISHED image, not the builder. It
+      # describes the layer set actually conveyed at the registry hop rather
+      # than an intermediate the recipient never receives, and it needs no
+      # deb-src entries in the builder.
+      - name: Assemble the Linux Corresponding Source pack
+        env:
+          UPSTREAM_TAG: ${{ needs.verify.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p source-pack/build
+          git archive --format=tar.gz -o "source-pack/qbittorrent-$UPSTREAM_TAG.tar.gz" "$UPSTREAM_TAG"
+          git format-patch "$UPSTREAM_TAG..HEAD" -o source-pack/patches >/dev/null
+          cp MODIFICATIONS.md source-pack/
+          cp -r nox-build source-pack/build/nox-build
+          rm -rf source-pack/build/nox-build/tests/__pycache__
+          cp .github/workflows/publish-nox.yml source-pack/build/
+          docker run --rm --entrypoint dpkg-query nox-engine:candidate \
+            -W -f='${Package} ${Version} ${source:Package}\n' > source-pack/installed-packages.txt
+          # github.ref_name is the TAG on a publish but the BRANCH on a dispatch,
+          # and the branch carries a '/', which tar reads as a path into a
+          # directory that does not exist. This step is deliberately unguarded so
+          # a rehearsal exercises it for real, so the name must survive both
+          # events. On a tag push the substitution changes nothing, which is why
+          # assert-release-complete can still build the expected asset names from
+          # GITHUB_REF_NAME directly.
+          PACKVER="${GITHUB_REF_NAME//\//-}"
+          PACK="qbittorrent-nox-linux-corresponding-source-$PACKVER.tar.gz"
+          tar czf "$PACK" source-pack
+          sha256sum "$PACK" > "$PACK.sha256"
+          echo "PACK=$PACK" >> "$GITHUB_ENV"
+
+      - name: Upload the Linux artifacts
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          echo "${{ steps.push.outputs.digest }}" > image-digest.txt
+          # --clobber is not optional: without it a re-run after a partial
+          # failure dies on the first already-uploaded asset, defeating the same
+          # re-run path the draft mechanism exists to survive.
+          gh release upload "$GITHUB_REF_NAME" "$PACK" "$PACK.sha256" image-digest.txt --clobber
+
+  # ---------------------------------------------------------------------------
+  publish-windows:
+    name: Windows bundle
+    needs: [verify, create-release]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Dynamic link only. Never pass -static or switch to a Qt-static triplet:
+      # the bundled Qt DLLs require the dynamic CRT regardless, so /MT on the
+      # executable only introduces a mixed-runtime hazard.
+      - name: Install Qt (dynamic, nox modules only)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.*'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          # nox link set: Core, Network, Sql, Xml, plus tls/sqldrivers plugins.
+          # No Gui, no Widgets, no Svg.
+          modules: ''
+          archives: 'qtbase qttools'
+          cache: true
+
+      - name: Set up MSVC (x64)
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      # An explicit port list, NOT the `boost` meta-port. The meta-port builds
+      # the whole collection and dominated this job's wall-clock: it was measured
+      # at 162 minutes and the job was cancelled at 60. The narrowed list below
+      # completed in 8m38s (measured 2026-08-12), so no binary cache is needed
+      # and none is configured.
+      #
+      # The Boost entries are taken from vcpkg's own `libtorrent` port manifest
+      # (ports/libtorrent/vcpkg.json), which is the authoritative statement of
+      # what libtorrent needs. Deriving them instead from find_package(...
+      # COMPONENTS ...) declarations does NOT work and was tried first: libtorrent
+      # includes several Boost headers directly without declaring them to CMake,
+      # so that list omitted boost-variant and the build died at
+      # polymorphic_socket.hpp with "Cannot open include file
+      # 'boost/variant/variant.hpp'".
+      #
+      # Two ports are needed BEYOND that manifest, for qBittorrent itself, and
+      # neither is discoverable from its CMake: it declares find_package(Boost
+      # REQUIRED) with no COMPONENTS (cmake/Modules/CheckPackages.cmake), so the
+      # declaration names nothing. boost-stacktrace is required because the
+      # configure below passes -DSTACKTRACE=ON, which pulls in
+      # src/app/stacktrace.cpp and its boost/stacktrace.hpp include; drop that
+      # option and this port becomes unnecessary. boost-circular-buffer is
+      # likewise a direct include rather than a declared component.
+      #
+      # The lesson generalises: this list is maintained by BUILDING, not by
+      # reading CMake. The `boost` meta-port hid every one of these by
+      # installing the whole collection.
+      #
+      # Add no VCPKG_BINARY_SOURCES here. The x-gha backend has been removed,
+      # and the NuGet replacement costs a feed, packages:write on a second
+      # surface, and mono, for a problem the measurement above says we do not have.
+      - name: Install Boost, OpenSSL, zlib via vcpkg
+        run: |
+          .\vcpkg\vcpkg.exe install `
+            "boost-asio:${{ env.VCPKG_TRIPLET }}" `
+            "boost-chrono:${{ env.VCPKG_TRIPLET }}" `
+            "boost-circular-buffer:${{ env.VCPKG_TRIPLET }}" `
+            "boost-config:${{ env.VCPKG_TRIPLET }}" `
+            "boost-crc:${{ env.VCPKG_TRIPLET }}" `
+            "boost-date-time:${{ env.VCPKG_TRIPLET }}" `
+            "boost-iterator:${{ env.VCPKG_TRIPLET }}" `
+            "boost-logic:${{ env.VCPKG_TRIPLET }}" `
+            "boost-multi-index:${{ env.VCPKG_TRIPLET }}" `
+            "boost-multiprecision:${{ env.VCPKG_TRIPLET }}" `
+            "boost-pool:${{ env.VCPKG_TRIPLET }}" `
+            "boost-random:${{ env.VCPKG_TRIPLET }}" `
+            "boost-scope-exit:${{ env.VCPKG_TRIPLET }}" `
+            "boost-stacktrace:${{ env.VCPKG_TRIPLET }}" `
+            "boost-system:${{ env.VCPKG_TRIPLET }}" `
+            "boost-variant:${{ env.VCPKG_TRIPLET }}" `
+            "openssl:${{ env.VCPKG_TRIPLET }}" `
+            "zlib:${{ env.VCPKG_TRIPLET }}"
+
+      # --recurse-submodules is required, not an optimisation: deps/try_signal
+      # is a submodule and CMakeLists.txt:548 lists try_signal.cpp in the
+      # torrent-rasterbar sources, so a plain clone fails at configure with
+      # "Cannot find source file".
+      - name: Clone libtorrent at ${{ env.LT_TAG }}
+        run: |
+          git clone --depth 1 --branch ${{ env.LT_TAG }} `
+            --recurse-submodules --shallow-submodules `
+            https://github.com/arvidn/libtorrent.git lt-src
+
+      - name: Build libtorrent
+        run: |
+          cmake -B lt-src\build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+            -DCMAKE_INSTALL_PREFIX=C:\lt-install `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }} `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+            lt-src
+          cmake --build lt-src\build --config Release --parallel
+          cmake --install lt-src\build
+
+      # Without this define set_ssl_certificate_buffer is a silent no-op, and a
+      # non-SSL binary is indistinguishable from a correct one at every
+      # interface the engine exposes.
+      - name: Assert TORRENT_SSL_PEERS compiled in
+        run: |
+          $cc = Get-Content "lt-src\build\compile_commands.json" -Raw -ErrorAction Stop
+          if ($cc -notmatch 'TORRENT_SSL_PEERS') {
+            Write-Error "TORRENT_SSL_PEERS not found in compile_commands.json — OpenSSL was not found during libtorrent configure."
+            exit 1
+          }
+          Write-Host "TORRENT_SSL_PEERS confirmed in compile_commands.json"
+
+      # The source is this repository's checkout. There is no clone-and-patch
+      # step: the modifications are commits.
+      - name: Configure CMake
+        run: |
+          cmake -B build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGUI=OFF `
+            -DWEBUI=ON `
+            -DTESTING=OFF `
+            -DSTACKTRACE=ON `
+            -DMSVC_RUNTIME_DYNAMIC=ON `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }} `
+            -DCMAKE_PREFIX_PATH="C:\lt-install;${{ env.QT_ROOT_DIR }}"
+
+      - name: Build qbittorrent-nox
+        run: cmake --build build --config Release --parallel
+
+      - name: Stage the engine bundle
+        run: |
+          New-Item -ItemType Directory -Force -Path engine-bundle\plugins\tls
+          New-Item -ItemType Directory -Force -Path engine-bundle\plugins\sqldrivers
+          New-Item -ItemType Directory -Force -Path engine-bundle\licenses
+
+          Copy-Item build\qbittorrent-nox.exe engine-bundle\
+
+          $qt = "${{ env.QT_ROOT_DIR }}\bin"
+          Copy-Item "$qt\Qt6Core.dll"    engine-bundle\
+          Copy-Item "$qt\Qt6Network.dll" engine-bundle\
+          Copy-Item "$qt\Qt6Sql.dll"     engine-bundle\
+          Copy-Item "$qt\Qt6Xml.dll"     engine-bundle\
+
+          Copy-Item "${{ env.QT_ROOT_DIR }}\plugins\tls\*" engine-bundle\plugins\tls\
+          Copy-Item "${{ env.QT_ROOT_DIR }}\plugins\sqldrivers\qsqlite.dll" `
+                    engine-bundle\plugins\sqldrivers\
+
+          @"
+          [Paths]
+          Prefix = .
+          Plugins = plugins
+          "@ | Set-Content engine-bundle\qt.conf
+
+          Copy-Item nox-build\THIRD-PARTY-NOTICES.md engine-bundle\
+          Copy-Item COPYING              engine-bundle\licenses\
+          Copy-Item COPYING.GPLv2        engine-bundle\licenses\
+          Copy-Item COPYING.GPLv3        engine-bundle\licenses\
+          Copy-Item AUTHORS              engine-bundle\licenses\
+          Copy-Item nox-build\licenses\* engine-bundle\licenses\
+
+          # Shipping vcruntime140.dll or msvcp140.dll beside the program
+          # forfeits the GPL System Library exception. Install the runtime
+          # separately with vc_redist.x64.exe instead.
+          $crtFiles = @(Get-ChildItem engine-bundle -Filter "vcruntime*" -Recurse)
+          $crtFiles += @(Get-ChildItem engine-bundle -Filter "msvcp*" -Recurse)
+          if ($crtFiles.Count -gt 0) {
+            Write-Error "CRT DLLs found in bundle — remove them: $($crtFiles.FullName -join ', ')"
+            exit 1
+          }
+
+      # The API key is qbt_ + exactly 28 characters (total 32). See the Linux
+      # job's note: a short key fails as a readiness timeout, not an auth error.
+      - name: Assert the runtime floors
+        run: |
+          $key  = 'qbt_cicicicicicicicicicicicicici'
+          $prof = New-TemporaryFile | ForEach-Object { Remove-Item $_; $_ }
+          New-Item -ItemType Directory -Force -Path "$prof\qBittorrent\config" | Out-Null
+
+          # On Windows QSettings reads qBittorrent.ini.
+          @"
+          [LegalNotice]
+          Accepted=true
+
+          [Preferences]
+          WebUI\Enabled=true
+          WebUI\Address=127.0.0.1
+          WebUI\Port=18765
+          WebUI\LocalHostAuth=true
+          WebUI\Username=ci
+          WebUI\APIKey=$key
+          "@ | Set-Content "$prof\qBittorrent\config\qBittorrent.ini"
+
+          $proc = Start-Process -FilePath "engine-bundle\qbittorrent-nox.exe" `
+            -ArgumentList "--profile=$prof","--webui-port=18765","--confirm-legal-notice" `
+            -PassThru -RedirectStandardOutput ci-nox-out.txt -RedirectStandardError ci-nox-err.txt
+
+          $deadline = (Get-Date).AddSeconds(30)
+          $r = $null
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:18765/api/v2/app/webapiVersion' `
+                -Headers @{ Authorization = "Bearer $key" } -UseBasicParsing -ErrorAction Stop
+              break
+            } catch { Start-Sleep -Milliseconds 500 }
+          }
+
+          if (-not $r) {
+            Get-Content ci-nox-out.txt -ErrorAction SilentlyContinue
+            Get-Content ci-nox-err.txt -ErrorAction SilentlyContinue
+            $proc | Stop-Process -Force
+            throw "qbittorrent-nox did not become ready within 30 s"
+          }
+
+          $ver = $r.Content.Trim()
+          Write-Host "webapiVersion = $ver"
+          if ([version]$ver -lt [version]'${{ env.QBT_WEBAPI_MIN }}') {
+            $proc | Stop-Process -Force
+            throw "webapiVersion $ver is below the required floor ${{ env.QBT_WEBAPI_MIN }}"
+          }
+
+          $info = Invoke-WebRequest -Uri 'http://127.0.0.1:18765/api/v2/app/buildInfo' `
+            -Headers @{ Authorization = "Bearer $key" } -UseBasicParsing | ConvertFrom-Json
+          Write-Host "libtorrent = $($info.libtorrent)"
+          $ltFloor = '${{ env.LT_TAG }}'.TrimStart('v')
+          if ([version]$info.libtorrent -lt [version]$ltFloor) {
+            $proc | Stop-Process -Force
+            throw "libtorrent $($info.libtorrent) is below the security floor $ltFloor (SSL peer-cert exact-match)"
+          }
+
+          # 403 here is INCONCLUSIVE, never a pass -- see the Linux job's note.
+          $code = try {
+            (Invoke-WebRequest -Uri 'http://127.0.0.1:18765/api/v2/search/plugins' `
+              -Headers @{ Authorization = "Bearer $key" } -UseBasicParsing -ErrorAction Stop).StatusCode
+          } catch { $_.Exception.Response.StatusCode.value__ }
+          Write-Host "search/plugins = $code"
+          $proc | Stop-Process -Force
+          if ($code -eq 403) { throw "403 is INCONCLUSIVE — authentication did not take. Never record this as a pass." }
+          if ($code -ne 404) { throw "search/plugins returned $code; the registration survived somewhere the source scan did not look" }
+          Write-Host "PASS: the search scope resolves to no controller"
+
+      # The Windows pack is NOT the Linux pack. This build links vcpkg versions
+      # of Qt, OpenSSL, Boost and zlib; the image links the distribution's, at
+      # entirely different versions. Shipping one as the other's Corresponding
+      # Source would publish source that does not correspond to the binary.
+      - name: Assemble the Windows Corresponding Source pack
+        env:
+          UPSTREAM_TAG: ${{ needs.verify.outputs.upstream_tag }}
+        run: |
+          New-Item -ItemType Directory -Force -Path source-pack\build | Out-Null
+
+          Invoke-WebRequest -Uri "https://github.com/qbittorrent/qBittorrent/archive/refs/tags/$env:UPSTREAM_TAG.tar.gz" `
+            -OutFile "source-pack\qbittorrent-$env:UPSTREAM_TAG.tar.gz" -UseBasicParsing
+
+          git format-patch "$env:UPSTREAM_TAG..HEAD" -o source-pack\patches | Out-Null
+          Copy-Item MODIFICATIONS.md source-pack\
+          Copy-Item .github\workflows\publish-nox.yml source-pack\build\
+          Copy-Item nox-build\README.md source-pack\build\
+
+          # Qt version resolved from the installed tree, never hardcoded -- but
+          # ASK THE TOOLCHAIN rather than scraping files for it. Grepping the
+          # first *.cmake containing "QT_VERSION " matched an uninterpolated
+          # template and yielded the literal '${PROJECT_VERSION}', which then
+          # 404'd against download.qt.io after the whole engine had already been
+          # built and asserted. qmake reports what is actually installed.
+          $qtVer = (& "$env:QT_ROOT_DIR\bin\qmake.exe" -query QT_VERSION).Trim()
+          Write-Host "Qt version linked: $qtVer"
+          # Non-vacuity floor: a version that is not a version must fail HERE,
+          # not as a download error whose message points at the wrong thing.
+          if ($qtVer -notmatch '^\d+\.\d+\.\d+$') {
+            throw "qmake reported '$qtVer', which is not a version. The Corresponding Source pack must name the Qt actually linked."
+          }
+          Invoke-WebRequest -Uri "https://download.qt.io/archive/qt/$($qtVer.Substring(0,4))/$qtVer/submodules/qtbase-everywhere-src-$qtVer.tar.xz" `
+            -OutFile "source-pack\qtbase-$qtVer.tar.xz" -UseBasicParsing
+
+          Invoke-WebRequest -Uri "https://github.com/arvidn/libtorrent/archive/refs/tags/${{ env.LT_TAG }}.tar.gz" `
+            -OutFile "source-pack\libtorrent-${{ env.LT_TAG }}.tar.gz" -UseBasicParsing
+
+          # MUST-VERIFY: the exact OpenSSL version must be read from vcpkg after
+          # install and recorded here, not assumed from the upstream release.
+          Invoke-WebRequest -Uri "https://github.com/openssl/openssl/archive/refs/tags/openssl-3.5.1.tar.gz" `
+            -OutFile "source-pack\openssl-3.5.1.tar.gz" -UseBasicParsing
+
+          Invoke-WebRequest -Uri "https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2" `
+            -OutFile "source-pack\boost_1_86_0.tar.bz2" -UseBasicParsing
+
+          Invoke-WebRequest -Uri "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz" `
+            -OutFile "source-pack\zlib-v1.3.1.tar.gz" -UseBasicParsing
+
+          # See the Linux pack step: ref_name carries a '/' on a dispatch, and
+          # this step is unguarded so the rehearsal exercises it. Unchanged on a
+          # tag push.
+          $packver = "${{ github.ref_name }}".Replace('/', '-')
+          $pack = "qbittorrent-nox-win-x64-corresponding-source-$packver.tar.gz"
+          tar czf $pack source-pack
+          (Get-FileHash $pack -Algorithm SHA256).Hash.ToLower() + "  $pack" |
+            Set-Content "$pack.sha256"
+          "PACK=$pack" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The zip lives INSIDE the guarded upload step, not in a step of its own.
+      # Only publishing steps carry the ref predicate, so a standalone zip step
+      # would also run on a dispatch -- where ref_name is hardened/release-X and
+      # the slash makes Compress-Archive write into a directory that does not
+      # exist. The archive exists only to feed this upload.
+      - name: Upload the Windows artifacts
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          $zip = "qbittorrent-nox-win-x64-${{ github.ref_name }}.zip"
+          Compress-Archive -Path engine-bundle\* -DestinationPath $zip -Force
+          gh release upload $env:GITHUB_REF_NAME $zip $env:PACK "$env:PACK.sha256" --clobber
+
+  # ---------------------------------------------------------------------------
+  assert-release-complete:
+    name: Assert the release is complete
+    needs: [publish-linux, publish-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # !cancelled() rather than the default success(). A failed publish job would
+    # otherwise SKIP this job -- which is exactly the case it exists for: the
+    # release would already carry one platform's binary and pack, and the check
+    # that would have named the gap would never run.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # The Corresponding Source travels with every artifact carrying the engine
+      # binary, or is served at the same place. A release carrying a binary
+      # without its pack stays a DRAFT rather than publishing incomplete.
+      - name: Check every expected asset is present
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort > assets.txt
+          cat assets.txt
+          for want in \
+            "qbittorrent-nox-win-x64-$GITHUB_REF_NAME.zip" \
+            "qbittorrent-nox-linux-corresponding-source-$GITHUB_REF_NAME.tar.gz" \
+            "qbittorrent-nox-linux-corresponding-source-$GITHUB_REF_NAME.tar.gz.sha256" \
+            "qbittorrent-nox-win-x64-corresponding-source-$GITHUB_REF_NAME.tar.gz" \
+            "qbittorrent-nox-win-x64-corresponding-source-$GITHUB_REF_NAME.tar.gz.sha256" \
+            "image-digest.txt"; do
+            grep -qxF "$want" assets.txt || { echo "::error::missing release asset: $want"; exit 1; }
+          done
+
+      # A GHCR digest is not a release asset, so this is a separate check.
+      - name: Check the image is in the registry
+        run: docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME"
+
+      - name: Verify the checksums
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --clobber \
+            --pattern '*corresponding-source-*.tar.gz' \
+            --pattern '*corresponding-source-*.tar.gz.sha256'
+          for f in *.sha256; do sha256sum -c "$f"; done
+
+      # Asserting an asset EXISTS says nothing about whether it is the source of
+      # the thing beside it, and correspondence is the entire licence claim.
+      # Done in CI on every release rather than once by hand.
+      - name: Verify the Linux pack corresponds to its own tarball
+        run: |
+          set -euo pipefail
+          CHECK="$(mktemp -d)"
+          tar xzf "qbittorrent-nox-linux-corresponding-source-$GITHUB_REF_NAME.tar.gz" -C "$CHECK"
+          TAG="${GITHUB_REF_NAME%-mod.*}"
+          mkdir -p "$CHECK/tree"
+          tar xzf "$CHECK/source-pack/qbittorrent-$TAG.tar.gz" -C "$CHECK/tree" --strip-components=1
+          # Absolute paths: git -C changes the working directory, so a relative
+          # patch path would resolve against the extracted tree, not the runner's.
+          PATCHES="$(ls "$CHECK"/source-pack/patches/*.patch)"
+          [ -n "$PATCHES" ] || { echo "::error::the pack carries no patches; a delta of nothing is not a correspondence proof"; exit 1; }
+          # shellcheck disable=SC2086
+          git -C "$CHECK/tree" apply --check $PATCHES \
+            || { echo "::error::the pack's patches do not apply to the pack's own pristine tarball"; exit 1; }
+          echo "PASS: the Linux pack's delta applies to its own upstream tarball"
+
+      # Only this step un-drafts. Reached only when every check above passed.
+      - name: Publish the release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
