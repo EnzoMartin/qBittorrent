@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "Build inputs this repository chooses, in one place. Read by the workflow at",
+    "run time and passed to the Docker build as build arguments, so there is one",
+    "copy of each value and drift between consumers is not possible.",
+    "",
+    "NOT here, deliberately:",
+    "  * GitHub Action refs and the Dockerfile's FROM line. Those are literals in",
+    "    their own files because a `uses:` reference cannot take an expression and",
+    "    Dependabot needs a literal to rewrite. Copying them here would create a",
+    "    second value to reconcile. See CLAUDE.md's merge procedure -- actions are",
+    "    SHA-pinned and bumped by hand, measured 2026-08-12.",
+    "  * nox-build/windows/vcpkg-ports.txt. It is the vcpkg download cache key, and",
+    "    folding it in here would invalidate that cache whenever any unrelated pin",
+    "    moved. No value participating in a cache key shares a file with values",
+    "    that do not.",
+    "  * Shape constants such as VCPKG_TRIPLET. They carry an invariant, not a",
+    "    version, and separating a value from the comment explaining it is how the",
+    "    invariant gets broken.",
+    "",
+    "A tag is a movable ref. Where a tag is the thing fetched, the commit it",
+    "resolved to when reviewed is recorded beside it and asserted after the fetch,",
+    "so a moved tag fails the build instead of silently changing what ships."
+  ],
+
+  "upstream": {
+    "tag": "release-5.2.3"
+  },
+
+  "libtorrent": {
+    "tag": "v2.0.13",
+    "commit": "7d7fc38fac61177fa5e02148f791b2f65250b09d"
+  },
+
+  "vcpkg": {
+    "release": "2026.07.29",
+    "commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  },
+
+  "qt": {
+    "$comment": "The version the Windows build has actually linked, read from QT_ROOT_DIR in a green run -- not the newest available. Pinning and upgrading are separate decisions.",
+    "windows": "6.10.3"
+  },
+
+  "floors": {
+    "$comment": [
+      "Minimum acceptable values asserted against a running binary. These are not",
+      "the versions fetched -- they are the floor a build must clear, and they",
+      "move only when the reason for the floor changes.",
+      "",
+      "libtorrent: SSL peer-cert matching is an exact comparison from 2.0.13.",
+      "Earlier versions compared only as many bytes as the certificate's own name,",
+      "so a leaf whose common name was a prefix of the torrent name authenticated",
+      "for it. Verify in torrent::verify_peer_cert, not from release notes --",
+      "upstream's changelog does not record the change.",
+      "",
+      "webapi: the 5.1 to 5.2 boundary changed the API protocol."
+    ],
+    "libtorrent": "2.0.13",
+    "webapi": "2.15.1"
+  }
+}

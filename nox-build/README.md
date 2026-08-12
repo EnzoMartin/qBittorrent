@@ -17,22 +17,29 @@ repository.
 
 ## Pinned versions
 
-| Component | Version | Why pinned |
-|---|---|---|
-| qBittorrent | this repository's tree, branched from `release-5.2.3` | WebAPI 2.15.1; the 5.1→5.2 boundary broke the API |
-| libtorrent | `v2.0.13` | Security floor: SSL peer-cert matching is exact from this version. `≤2.0.12` compared only as many bytes as the certificate's own name, so a leaf whose common name was a prefix of the torrent name authenticated for it (`torrent::verify_peer_cert`, `src/torrent.cpp`). Upstream's changelog does not record the change; verify it in that function, not from release notes |
-| Qt (Linux) | from the base image's apt | See the Dockerfile's `WHY ubuntu:26.04` block. `minQt6Version` is 6.6.0 and REQUIRED |
-| Qt (Windows) | `6.10.x` | Resolved by the vcpkg baseline at the qBittorrent tag |
-| OpenSSL (Windows) | `3.5.1` | As shipped with the official qBT 5.2.3 release |
-| Boost (Windows) | `1.86.0` | As shipped with the official qBT 5.2.3 release |
-| zlib (Windows) | `1.3.1` | As shipped with the official qBT 5.2.3 release |
+**Read `pins.json`, not this section.** Values are deliberately not repeated
+here: a copy the build reads cannot drift, a copy the build compares drifts
+loudly, and a copy only a human reads drifts silently while looking
+authoritative. This section had four wrong rows before it was reduced to
+pointers.
+
+| Where | What it pins |
+|---|---|
+| `pins.json` | libtorrent (tag and commit), vcpkg, Qt for Windows, the upstream tag, and the assertion floors |
+| `windows/vcpkg-ports.txt` | the vcpkg port set. Separate because it is the download cache key |
+| `.github/workflows/publish-nox.yml` | GitHub Action refs, SHA-pinned. Bumped by hand — Dependabot does not maintain SHA pins (measured 2026-08-12) |
+| `linux/Dockerfile` | the base image, as a literal `FROM` so Dependabot can update it |
+
+Qt on Linux is not pinned at all: it comes from the base image's apt, and the
+Dockerfile's `WHY ubuntu:26.04` block records the `minQt6Version` 6.6.0 floor
+that decides the base.
 
 **On every upstream version bump:** follow the merge procedure in the root
-`CLAUDE.md`, update this table, update the tags in
-`.github/workflows/publish-nox.yml`, and re-check the two items that are
-verified by reading rather than by test — that the deletion sites still match the
-new source, and that libtorrent's SSL peer-certificate comparison is still an
-exact match rather than a prefix compare.
+`CLAUDE.md`. Re-check the two items verified by reading rather than by test —
+that the deletion sites still match the new source, and that libtorrent's
+SSL peer-certificate comparison is still an exact match rather than a prefix
+compare (`torrent::verify_peer_cert` in `src/torrent.cpp`; upstream's changelog
+does not record that fix, so release notes will not tell you).
 
 ---
 
@@ -41,8 +48,17 @@ exact match rather than a prefix compare.
 The Linux binary is built and published as a container image.
 
 ```
-docker build -f nox-build/linux/Dockerfile -t nox-engine:local .
+docker build -f nox-build/linux/Dockerfile -t nox-engine:local \
+  --build-arg LT_TAG="$(jq -r .libtorrent.tag nox-build/pins.json)" \
+  --build-arg LT_COMMIT="$(jq -r .libtorrent.commit nox-build/pins.json)" \
+  .
 ```
+
+The libtorrent arguments have no defaults in the Dockerfile and the build fails
+without them. That is deliberate: a default would be a second copy of the
+version, and the drift it permits is invisible in one direction — the runtime
+floor asserts a minimum, so a Dockerfile bumped without `pins.json` passes while
+the floor it is checked against silently weakens.
 
 The context is the **repository root**, not `nox-build/linux`. The recipe does
 `COPY . /src/qbt`, so the image is built from this repository's own committed
@@ -122,16 +138,20 @@ cmake -B build -G "Ninja" `
   -DSTACKTRACE=ON `
   -DMSVC_RUNTIME_DYNAMIC=ON `
   -DCMAKE_TOOLCHAIN_FILE="vcpkg\scripts\buildsystems\vcpkg.cmake" `
-  -DVCPKG_TARGET_TRIPLET=x64-windows `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
   -DCMAKE_PREFIX_PATH="<path-to-Qt6-install>"
 ```
+
+**The triplet is `x64-windows-static-md`, and it is not interchangeable.** Static
+libraries with the dynamic CRT (`/MD`), matching `MSVC_RUNTIME_DYNAMIC=ON`.
+Building with `x64-windows-static` instead links `/MT` and mixes CRTs, which is
+undefined behaviour rather than a style choice; `x64-windows` links the
+dependencies dynamically and produces a bundle missing DLLs it needs.
 
 **Qt linkage.** Qt is linked dynamically. This is our chosen build shape — it
 keeps the Qt libraries replaceable and avoids mixed-runtime hazards — not a
 licence requirement; LGPLv3 §4(d) permits either a shared-library form or a
-suitable relinking mechanism. `/MT` CRT embedding is rejected on the technical
-ground alone: the bundled Qt DLLs require the dynamic CRT regardless, so `/MT` on
-the executable only introduces a mixed-runtime hazard.
+suitable relinking mechanism.
 
 ### 4. Build
 

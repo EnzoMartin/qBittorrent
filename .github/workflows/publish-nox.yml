@@ -38,14 +38,11 @@ env:
   # ${{ github.repository_owner }} expands to mixed case, so the push would fail
   # on an invalid reference. Asserted before the push rather than trusted.
   IMAGE: ghcr.io/enzomartin/qbittorrent-nox
-  LT_TAG: v2.0.13
-  QBT_WEBAPI_MIN: '2.15.1'
-  # vcpkg release 2026.07.29, as an immutable commit. A tag can be moved; a
-  # commit cannot, and this one decides every port version the Windows build
-  # links. Bump it deliberately -- nothing bumps it automatically.
-  VCPKG_REF: 9e593bb18ea69cc5095e012465dcd675a822ed0d
   # Static libraries, dynamic CRT (/MD). MSVC_RUNTIME_DYNAMIC=ON uses /MD, and
   # mixing /MT from x64-windows-static with /MD is undefined CRT behaviour.
+  # A shape constant, not a version: it stays here with its invariant rather
+  # than moving to pins.json, because separating the two is how the invariant
+  # gets broken.
   VCPKG_TRIPLET: x64-windows-static-md
 
 jobs:
@@ -56,6 +53,12 @@ jobs:
     timeout-minutes: 10
     outputs:
       upstream_tag: ${{ steps.tag.outputs.upstream_tag }}
+      lt_tag: ${{ steps.pins.outputs.lt_tag }}
+      lt_commit: ${{ steps.pins.outputs.lt_commit }}
+      vcpkg_ref: ${{ steps.pins.outputs.vcpkg_ref }}
+      qt_windows: ${{ steps.pins.outputs.qt_windows }}
+      floor_libtorrent: ${{ steps.pins.outputs.floor_libtorrent }}
+      floor_webapi: ${{ steps.pins.outputs.floor_webapi }}
     steps:
       # fetch-depth: 0 and fetch-tags are required, not tidy. actions/checkout
       # fetches a single commit by default, and at depth 1 the tests' upstream
@@ -88,6 +91,41 @@ jobs:
           fi
           echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Upstream tag: $TAG"
+
+      # Read once here and passed to every consumer as a job output, so each
+      # value has exactly one copy. Every key is required: an absent one becomes
+      # an empty string, and an empty FLOOR is the dangerous case -- `printf ''`
+      # piped to `sort -V -C` sorts fine and passes, silently disabling the
+      # assertion it was meant to enforce.
+      - name: Read the pins
+        id: pins
+        run: |
+          set -euo pipefail
+          read_pin() {
+            v=$(python3 -c "import json,sys; d=json.load(open('nox-build/pins.json')); print(eval(sys.argv[1], {}, {'d': d}))" "$1" 2>/dev/null || true)
+            if [ -z "$v" ] || [ "$v" = "None" ]; then
+              echo "::error::nox-build/pins.json is missing or empty at $1"; exit 1
+            fi
+            echo "$2=$v" >> "$GITHUB_OUTPUT"
+            echo "  $2 = $v"
+          }
+          echo "Pins read from nox-build/pins.json:"
+          read_pin "d['libtorrent']['tag']"    lt_tag
+          read_pin "d['libtorrent']['commit']" lt_commit
+          read_pin "d['vcpkg']['commit']"      vcpkg_ref
+          read_pin "d['qt']['windows']"        qt_windows
+          read_pin "d['floors']['libtorrent']" floor_libtorrent
+          read_pin "d['floors']['webapi']"     floor_webapi
+
+      # The upstream tag is derived from the ref rather than read from pins.json,
+      # and the two must agree: the ref decides what is built, so a pins.json
+      # naming a different tag would describe an artifact nobody produced.
+      - name: Assert the pinned upstream tag matches the ref
+        run: |
+          set -euo pipefail
+          PINNED=$(python3 -c "import json; print(json.load(open('nox-build/pins.json'))['upstream']['tag'])")
+          [ "$PINNED" = "${{ steps.tag.outputs.upstream_tag }}" ] \
+            || { echo "::error::pins.json records upstream tag '$PINNED' but this build derives '${{ steps.tag.outputs.upstream_tag }}' from the ref"; exit 1; }
 
       - name: Run the post-condition tests
         env:
@@ -186,6 +224,11 @@ jobs:
           load: true
           push: false
           tags: ${{ env.IMAGE }}:${{ steps.ref.outputs.tag }}
+          # The Dockerfile declares these with no defaults, so the pin file is
+          # the only source and a local build must pass them too.
+          build-args: |
+            LT_TAG=${{ needs.verify.outputs.lt_tag }}
+            LT_COMMIT=${{ needs.verify.outputs.lt_commit }}
           labels: |
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.source=https://github.com/EnzoMartin/qBittorrent
@@ -204,6 +247,9 @@ jobs:
       # QSettings picks the config name by platform: qBittorrent.conf here, not
       # .ini.
       - name: Assert the built image's runtime floors
+        env:
+          FLOOR_WEBAPI: ${{ needs.verify.outputs.floor_webapi }}
+          FLOOR_LIBTORRENT: ${{ needs.verify.outputs.floor_libtorrent }}
         run: |
           set -euo pipefail
           KEY='qbt_cicicicicicicicicicicicicici'
@@ -238,15 +284,18 @@ jobs:
             http://127.0.0.1:18765/api/v2/app/webapiVersion)
           echo "webapiVersion = $WEBAPI"
           [ -n "$WEBAPI" ] || { echo "::error::no webapiVersion; the key was rejected and the 404 below would be meaningless"; exit 1; }
-          printf '%s\n%s\n' "$QBT_WEBAPI_MIN" "$WEBAPI" | sort -V -C \
-            || { echo "::error::webapiVersion $WEBAPI is below the floor $QBT_WEBAPI_MIN"; exit 1; }
+          printf '%s\n%s\n' "$FLOOR_WEBAPI" "$WEBAPI" | sort -V -C \
+            || { echo "::error::webapiVersion $WEBAPI is below the floor $FLOOR_WEBAPI"; exit 1; }
 
           LT=$(curl -fsS -H "Authorization: Bearer $KEY" \
             http://127.0.0.1:18765/api/v2/app/buildInfo | sed -n 's/.*"libtorrent":"\([^"]*\)".*/\1/p')
           echo "libtorrent = $LT"
           [ -n "$LT" ] || { echo "::error::buildInfo did not report a libtorrent version"; exit 1; }
-          printf '%s\n%s\n' "${LT_TAG#v}" "$LT" | sort -V -C \
-            || { echo "::error::libtorrent $LT is below the security floor ${LT_TAG#v} (SSL peer-cert exact match)"; exit 1; }
+          # Compared against the FLOOR, not against the tag fetched. They are
+          # different values with different reasons to move: one is what we
+          # build, the other is the minimum any build must clear.
+          printf '%s\n%s\n' "$FLOOR_LIBTORRENT" "$LT" | sort -V -C \
+            || { echo "::error::libtorrent $LT is below the security floor $FLOOR_LIBTORRENT (SSL peer-cert exact match)"; exit 1; }
 
           CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
             http://127.0.0.1:18765/api/v2/search/plugins)
@@ -342,7 +391,12 @@ jobs:
       - name: Install Qt (dynamic, nox modules only)
         uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
         with:
-          version: '6.10.*'
+          # Exact, from pins.json. A moving spec such as 6.10.* changes both the
+          # bundled DLLs and the qtbase source URL fetched into the Corresponding
+          # Source pack, and the Actions cache below then decides which
+          # resolution is used -- making what ships a function of cache state
+          # rather than of anything in this file.
+          version: '${{ needs.verify.outputs.qt_windows }}'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
@@ -367,7 +421,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           git init vcpkg
           git -C vcpkg remote add origin https://github.com/microsoft/vcpkg.git
-          git -C vcpkg fetch --depth 1 origin ${{ env.VCPKG_REF }}
+          git -C vcpkg fetch --depth 1 origin ${{ needs.verify.outputs.vcpkg_ref }}
           git -C vcpkg checkout --detach FETCH_HEAD
 
       # Restored after the fetch so it cannot collide with it. Source archives
@@ -379,9 +433,9 @@ jobs:
         id: vcpkg-cache
         with:
           path: vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-${{ hashFiles('nox-build/windows/vcpkg-ports.txt') }}
+          key: vcpkg-${{ runner.os }}-${{ needs.verify.outputs.vcpkg_ref }}-${{ hashFiles('nox-build/windows/vcpkg-ports.txt') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-
+            vcpkg-${{ runner.os }}-${{ needs.verify.outputs.vcpkg_ref }}-
 
       - name: Bootstrap vcpkg
         run: |
@@ -423,13 +477,20 @@ jobs:
       # is a submodule and CMakeLists.txt:548 lists try_signal.cpp in the
       # torrent-rasterbar sources, so a plain clone fails at configure with
       # "Cannot find source file".
-      - name: Clone libtorrent at ${{ env.LT_TAG }}
+      - name: Clone libtorrent at ${{ needs.verify.outputs.lt_tag }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ErrorActionPreference = 'Stop'
-          git clone --depth 1 --branch ${{ env.LT_TAG }} `
+          git clone --depth 1 --branch ${{ needs.verify.outputs.lt_tag }} `
             --recurse-submodules --shallow-submodules `
             https://github.com/arvidn/libtorrent.git lt-src
+          # The tag is fetched and the commit asserted, matching the Linux
+          # recipe. A tag is movable and this one decides whether SSL peer
+          # certificates are compared exactly or by prefix.
+          $actual = (git -C lt-src rev-parse HEAD).Trim()
+          if ($actual -ne '${{ needs.verify.outputs.lt_commit }}') {
+            throw "libtorrent ${{ needs.verify.outputs.lt_tag }} resolves to $actual but pins.json records ${{ needs.verify.outputs.lt_commit }}. The tag moved."
+          }
 
       # A failing cmake --build does NOT abort a pwsh step by default, so
       # without this the install below can succeed on a partial tree, the step
@@ -578,15 +639,16 @@ jobs:
 
           $ver = $r.Content.Trim()
           Write-Host "webapiVersion = $ver"
-          if ([version]$ver -lt [version]'${{ env.QBT_WEBAPI_MIN }}') {
+          if ([version]$ver -lt [version]'${{ needs.verify.outputs.floor_webapi }}') {
             $proc | Stop-Process -Force
-            throw "webapiVersion $ver is below the required floor ${{ env.QBT_WEBAPI_MIN }}"
+            throw "webapiVersion $ver is below the required floor ${{ needs.verify.outputs.floor_webapi }}"
           }
 
           $info = Invoke-WebRequest -Uri 'http://127.0.0.1:18765/api/v2/app/buildInfo' `
             -Headers @{ Authorization = "Bearer $key" } -UseBasicParsing | ConvertFrom-Json
           Write-Host "libtorrent = $($info.libtorrent)"
-          $ltFloor = '${{ env.LT_TAG }}'.TrimStart('v')
+          # The FLOOR, not the tag fetched -- see the Linux job's note.
+          $ltFloor = '${{ needs.verify.outputs.floor_libtorrent }}'
           if ([version]$info.libtorrent -lt [version]$ltFloor) {
             $proc | Stop-Process -Force
             throw "libtorrent $($info.libtorrent) is below the security floor $ltFloor (SSL peer-cert exact-match)"
@@ -644,8 +706,8 @@ jobs:
           Invoke-WebRequest -Uri "https://download.qt.io/archive/qt/$($qtVer.Substring(0,4))/$qtVer/submodules/qtbase-everywhere-src-$qtVer.tar.xz" `
             -OutFile "source-pack\qtbase-$qtVer.tar.xz" -UseBasicParsing
 
-          Invoke-WebRequest -Uri "https://github.com/arvidn/libtorrent/archive/refs/tags/${{ env.LT_TAG }}.tar.gz" `
-            -OutFile "source-pack\libtorrent-${{ env.LT_TAG }}.tar.gz" -UseBasicParsing
+          Invoke-WebRequest -Uri "https://github.com/arvidn/libtorrent/archive/refs/tags/${{ needs.verify.outputs.lt_tag }}.tar.gz" `
+            -OutFile "source-pack\libtorrent-${{ needs.verify.outputs.lt_tag }}.tar.gz" -UseBasicParsing
 
           # OpenSSL, Boost and zlib come from vcpkg's own downloads/ -- the exact
           # archives it fetched and SHA512-verified before building them.
@@ -660,6 +722,7 @@ jobs:
 
           # The port list is a build input and must be reproducible from the pack.
           Copy-Item nox-build\windows\vcpkg-ports.txt source-pack\build\
+          Copy-Item nox-build\pins.json source-pack\build\
 
           # See the Linux pack step: ref_name carries a '/' on a dispatch, and
           # this step is unguarded so the rehearsal exercises it. Unchanged on a
