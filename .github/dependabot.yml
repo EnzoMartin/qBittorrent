@@ -17,6 +17,13 @@ updates:
     schedule:
       interval: "monthly"
 
+  # Measured 2026-08-12: Dependabot does not bump actions pinned to a commit
+  # SHA. Pinning actions/checkout one patch behind produced no PR, while three
+  # tag-pinned actions in the same group and the same run were bumped. Every
+  # action here is SHA-pinned, so this block currently raises nothing. It is
+  # kept because the measurement may stop being true, and because removing it
+  # would silently drop the ecosystem if a future action is added on a tag.
+  # Action bumps are a step in CLAUDE.md's merge procedure, not automatic.
   - package-ecosystem: "github-actions"
     directory: "/"
     commit-message:
