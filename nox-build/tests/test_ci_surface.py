@@ -21,7 +21,10 @@ import unittest
 
 from _support import git_lines
 
-EXPECTED_WORKFLOWS = {".github/workflows/publish-nox.yml"}
+EXPECTED_WORKFLOWS = {
+    ".github/workflows/checks.yml",
+    ".github/workflows/publish-nox.yml",
+}
 
 
 class TestCiSurface(unittest.TestCase):

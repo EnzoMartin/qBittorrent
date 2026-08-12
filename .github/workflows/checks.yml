@@ -1,0 +1,64 @@
+# Runs the post-condition tests before a change can merge.
+#
+# Separate from publish-nox.yml because the two have different triggers,
+# different permissions and different runtimes. Folding these checks into the
+# publishing workflow is what would force every guard there to be step-level and
+# would run two 120-minute builds on every bot pull request.
+#
+# Without this, nothing in the repository verifies anything before merge: the
+# publishing workflow triggers only on a tag, so a dependency bump reaches the
+# default branch with the RCE-surface assertions never having run.
+
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: ['hardened/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  post-condition-tests:
+    name: Post-condition tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 and fetch-tags are required: the tests read the upstream
+      # side with `git show <tag>:<path>`, which a depth-1 checkout cannot serve.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Derived per event, and NOT from github.ref_name. On a pull_request that
+      # is "<n>/merge", which names no upstream tag -- deriving from it fails the
+      # tests in a way that reads as a source defect rather than a workflow one.
+      # base_ref is the branch being merged into and carries the tag; on a branch
+      # push ref_name is the branch itself.
+      - name: Derive the upstream tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = 'pull_request' ]; then
+            REF='${{ github.base_ref }}'
+          else
+            REF='${{ github.ref_name }}'
+          fi
+          case "$REF" in
+            hardened/*) TAG="${REF#hardened/}" ;;
+            *) echo "::error::'$REF' is not a hardened/<upstream-tag> branch; this workflow cannot derive an upstream tag from it"; exit 1 ;;
+          esac
+          echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Upstream tag: $TAG"
+
+      # The same suite the publishing workflow runs, on the same tag, before the
+      # change lands rather than after.
+      - name: Run the post-condition tests
+        env:
+          UPSTREAM_TAG: ${{ steps.tag.outputs.upstream_tag }}
+        run: python3 -m unittest discover -s nox-build/tests -v
