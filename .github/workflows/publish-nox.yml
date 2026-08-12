@@ -149,7 +149,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The login is NOT implied by permissions: packages: write. That grants
       # the token the right; it does not hand the token to the Docker daemon,
@@ -185,7 +185,7 @@ jobs:
       # Add no cache-from/cache-to: it serves a stale apt layer into a published
       # security artifact.
       - name: Build the image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: nox-build/linux/Dockerfile
@@ -381,7 +381,7 @@ jobs:
       # caught at consumption. vcpkg.exe is deliberately NOT cached -- a restored
       # executable is run with nothing verifying it.
       - name: Restore the vcpkg download cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         id: vcpkg-cache
         with:
           path: vcpkg/downloads
@@ -420,7 +420,7 @@ jobs:
       # exists for. actions/cache's combined form saves only on job success.
       - name: Save the vcpkg download cache
         if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: vcpkg/downloads
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
