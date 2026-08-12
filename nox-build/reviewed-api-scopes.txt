@@ -1,0 +1,13 @@
+# WebUI API scopes this build exposes.
+# Derived from registerAPIController() calls in src/webui/webapplication.cpp.
+# 'auth' is listed although it is NOT registered through that call — it is
+# dispatched from m_authController directly, so a shape-only scan cannot see it.
+app
+auth
+clientdata
+log
+rss
+sync
+torrentcreator
+torrents
+transfer
