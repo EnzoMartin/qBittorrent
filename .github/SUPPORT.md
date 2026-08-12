@@ -1,18 +1,21 @@
-# Support Resources
+# Support
 
-The issue tracker is only for bug reports/feature requests related to the project itself.
+**This repository is a build fork. It does not accept issues, pull requests, or
+feature requests, and it provides no support.**
 
-Please do not use the issue tracker for questions about general program usage,
-how BitTorrent (the protocol) works in general, etc.
+It exists to publish a `qbittorrent-nox` built from a specific upstream release
+with two source deletions applied. See `MODIFICATIONS.md` at the repository root
+for exactly what those are and how to reproduce them.
 
-For such questions, use one of the following community support resources:
+For anything to do with qBittorrent itself — bugs, features, usage questions, or
+support — go to the upstream project, which is where that work happens:
 
-* The [discussions section][discussions-url]
+* [Upstream repository](https://github.com/qbittorrent/qBittorrent)
+* [Discussions](https://github.com/qbittorrent/qBittorrent/discussions)
+* [Official forum](http://forum.qbittorrent.org/)
+* [The qBittorrent subreddit](https://www.reddit.com/r/qBittorrent/)
 
-* The [official forum][forum-url]
-
-* The [qBittorrent subreddit][subreddit-url]
-
-[discussions-url]: https://github.com/qbittorrent/qBittorrent/discussions
-[forum-url]: http://forum.qbittorrent.org/
-[subreddit-url]: https://www.reddit.com/r/qBittorrent/
+Bugs found in the upstream software should be reported upstream, not here. A bug
+that exists only in this fork's build recipe is the one thing worth raising, and
+there is no tracker open for it — read `MODIFICATIONS.md` and the build recipe
+under `nox-build/` and fix it in your own fork.
