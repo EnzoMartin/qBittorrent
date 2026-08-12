@@ -25,9 +25,11 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
+# Least privilege at the workflow level; jobs that need more declare it. A
+# workflow-wide contents:write hands every job -- including the one that only
+# runs tests -- the token that publishes releases.
 permissions:
-  contents: write     # gh release create / upload
-  packages: write     # GHCR push
+  contents: read
 
 env:
   GH_TOKEN: ${{ github.token }}        # gh needs a token env var; it is not exported automatically
@@ -98,6 +100,8 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       # View first, create only if absent. NOT `create || view`: gh's duplicate
       # guard is `if hasAssets && !opts.Draft`, so a draft with no assets skips
@@ -129,7 +133,10 @@ jobs:
     name: Linux image
     needs: [verify, create-release]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -250,23 +257,6 @@ jobs:
             *)   echo "::error::search/plugins returned $CODE; the registration survived somewhere the source scan did not look"; exit 1 ;;
           esac
 
-      # Pushes the image built above; does not rebuild.
-      - name: Push the image
-        if: github.event_name == 'push' && github.ref_type == 'tag'
-        id: push
-        run: |
-          set -euo pipefail
-          REF="$IMAGE:${{ steps.ref.outputs.tag }}"
-          docker push "$REF"
-          DIGEST=$(docker inspect --format '{{ index .RepoDigests 0 }}' "$REF" | cut -d@ -f2)
-          # An empty digest reaches image-digest.txt and is consumed as the pin.
-          case "$DIGEST" in
-            sha256:*) ;;
-            *) echo "::error::could not read a digest for $REF after push; got '$DIGEST'"; exit 1 ;;
-          esac
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Published $IMAGE@$DIGEST"
-
       # The manifest is generated from the FINISHED image, not the builder. It
       # describes the layer set actually conveyed at the registry hop rather
       # than an intermediate the recipient never receives, and it needs no
@@ -277,7 +267,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p source-pack/build
-          git archive --format=tar.gz -o "source-pack/qbittorrent-$UPSTREAM_TAG.tar.gz" "$UPSTREAM_TAG"
+          # --prefix matches what the correspondence check strips, and stops the
+          # archive detonating into the extractor's working directory.
+          git archive --format=tar.gz --prefix="qbittorrent-$UPSTREAM_TAG/" \
+            -o "source-pack/qbittorrent-$UPSTREAM_TAG.tar.gz" "$UPSTREAM_TAG"
           git format-patch "$UPSTREAM_TAG..HEAD" -o source-pack/patches >/dev/null
           cp MODIFICATIONS.md source-pack/
           cp -r nox-build source-pack/build/nox-build
@@ -298,6 +291,27 @@ jobs:
           sha256sum "$PACK" > "$PACK.sha256"
           echo "PACK=$PACK" >> "$GITHUB_ENV"
 
+      # Pushes the image built above; does not rebuild. Ordered AFTER the pack is
+      # assembled: pushing first leaves the binary pullable from the registry
+      # while its Corresponding Source is still an unassembled draft, and the
+      # pack step runs a container, two git commands and a tar, any of which can
+      # strand it there.
+      - name: Push the image
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        id: push
+        run: |
+          set -euo pipefail
+          REF="$IMAGE:${{ steps.ref.outputs.tag }}"
+          docker push "$REF"
+          DIGEST=$(docker inspect --format '{{ index .RepoDigests 0 }}' "$REF" | cut -d@ -f2)
+          # An empty digest reaches image-digest.txt and is consumed as the pin.
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::could not read a digest for $REF after push; got '$DIGEST'"; exit 1 ;;
+          esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published $IMAGE@$DIGEST"
+
       - name: Upload the Linux artifacts
         if: github.event_name == 'push' && github.ref_type == 'tag'
         run: |
@@ -314,6 +328,8 @@ jobs:
     needs: [verify, create-release]
     runs-on: windows-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -341,31 +357,37 @@ jobs:
         with:
           arch: x64
 
-      # Restored before the clone so a hit removes the bootstrap download and
-      # every port archive fetch. Caches source archives only: extending this to
-      # built packages serves stale output into a published artifact.
+      # init + fetch, not clone: clone refuses a non-empty destination, and the
+      # download cache below populates vcpkg/ before this runs on every hit.
+      # Detached at a pinned commit -- on master every port version moves between
+      # releases of one engine version.
+      - name: Fetch vcpkg at the pinned commit
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          git init vcpkg
+          git -C vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C vcpkg fetch --depth 1 origin ${{ env.VCPKG_REF }}
+          git -C vcpkg checkout --detach FETCH_HEAD
+
+      # Restored after the fetch so it cannot collide with it. Source archives
+      # only: vcpkg SHA512-verifies each one on use, so a poisoned entry is
+      # caught at consumption. vcpkg.exe is deliberately NOT cached -- a restored
+      # executable is run with nothing verifying it.
       - name: Restore the vcpkg download cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: vcpkg-cache
         with:
-          path: |
-            vcpkg/downloads
-            vcpkg/vcpkg.exe
+          path: vcpkg/downloads
           key: vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-${{ hashFiles('nox-build/windows/vcpkg-ports.txt') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-
 
-      # Detached at a pinned commit. Cloning master lets every port version move
-      # between releases of one engine version, and makes the cache key above
-      # match across differing port sets.
       - name: Bootstrap vcpkg
         run: |
-          git clone https://github.com/microsoft/vcpkg.git
-          git -C vcpkg checkout --detach ${{ env.VCPKG_REF }}
-          if (-not (Test-Path vcpkg\vcpkg.exe)) {
-            .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          } else {
-            Write-Host "vcpkg.exe restored from cache; skipping bootstrap download"
-          }
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       # Ports come from nox-build/windows/vcpkg-ports.txt, which states why each
       # is there. Restoring the `boost` meta-port in its place costs 162 minutes
@@ -387,18 +409,35 @@ jobs:
           & .\vcpkg\vcpkg.exe install @args
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
 
+      # Saved even when the install fails: a partial downloads/ is exactly what
+      # the next attempt needs, and a download failure is the case this cache
+      # exists for. actions/cache's combined form saves only on job success.
+      - name: Save the vcpkg download cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/downloads
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
       # --recurse-submodules is required, not an optimisation: deps/try_signal
       # is a submodule and CMakeLists.txt:548 lists try_signal.cpp in the
       # torrent-rasterbar sources, so a plain clone fails at configure with
       # "Cannot find source file".
       - name: Clone libtorrent at ${{ env.LT_TAG }}
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           git clone --depth 1 --branch ${{ env.LT_TAG }} `
             --recurse-submodules --shallow-submodules `
             https://github.com/arvidn/libtorrent.git lt-src
 
+      # A failing cmake --build does NOT abort a pwsh step by default, so
+      # without this the install below can succeed on a partial tree, the step
+      # exits 0, and the failure surfaces later as a qBittorrent link error.
       - name: Build libtorrent
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           cmake -B lt-src\build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_SHARED_LIBS=OFF `
@@ -427,6 +466,8 @@ jobs:
       # step: the modifications are commits.
       - name: Configure CMake
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           cmake -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DGUI=OFF `
@@ -439,7 +480,10 @@ jobs:
             -DCMAKE_PREFIX_PATH="C:\lt-install;${{ env.QT_ROOT_DIR }}"
 
       - name: Build qbittorrent-nox
-        run: cmake --build build --config Release --parallel
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          cmake --build build --config Release --parallel
 
       - name: Stage the engine bundle
         run: |
@@ -504,8 +548,15 @@ jobs:
           WebUI\APIKey=$key
           "@ | Set-Content "$prof\qBittorrent\config\qBittorrent.ini"
 
+          # Launched with Qt scrubbed from the environment. install-qt-action
+          # puts Qt's bin on PATH and exports QT_PLUGIN_PATH, which Qt searches
+          # in ADDITION to qt.conf -- so a DLL or plugin missing from the bundle
+          # resolves from the Qt tree here and fails on a machine that has
+          # neither. The bundle must stand alone or this proves nothing.
+          $clean = 'C:\Windows\System32;C:\Windows'
           $proc = Start-Process -FilePath "engine-bundle\qbittorrent-nox.exe" `
             -ArgumentList "--profile=$prof","--webui-port=18765","--confirm-legal-notice" `
+            -Environment @{ PATH = $clean; QT_PLUGIN_PATH = ''; QT_ROOT_DIR = ''; QML2_IMPORT_PATH = '' } `
             -PassThru -RedirectStandardOutput ci-nox-out.txt -RedirectStandardError ci-nox-err.txt
 
           $deadline = (Get-Date).AddSeconds(30)
@@ -560,10 +611,17 @@ jobs:
         env:
           UPSTREAM_TAG: ${{ needs.verify.outputs.upstream_tag }}
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path source-pack\build | Out-Null
+          New-Item -ItemType Directory -Force -Path source-pack\vcpkg-sources | Out-Null
 
-          Invoke-WebRequest -Uri "https://github.com/qbittorrent/qBittorrent/archive/refs/tags/$env:UPSTREAM_TAG.tar.gz" `
-            -OutFile "source-pack\qbittorrent-$env:UPSTREAM_TAG.tar.gz" -UseBasicParsing
+          # Produced from this checkout's object database, matching the Linux
+          # pack. GitHub's archive endpoint is a generated artifact whose bytes
+          # have changed before, and fetching it makes the pack depend on a
+          # network call it does not need.
+          git archive --format=tar.gz --prefix="qbittorrent-$env:UPSTREAM_TAG/" `
+            -o "source-pack\qbittorrent-$env:UPSTREAM_TAG.tar.gz" $env:UPSTREAM_TAG
 
           git format-patch "$env:UPSTREAM_TAG..HEAD" -o source-pack\patches | Out-Null
           Copy-Item MODIFICATIONS.md source-pack\
@@ -589,16 +647,19 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/arvidn/libtorrent/archive/refs/tags/${{ env.LT_TAG }}.tar.gz" `
             -OutFile "source-pack\libtorrent-${{ env.LT_TAG }}.tar.gz" -UseBasicParsing
 
-          # MUST-VERIFY: the exact OpenSSL version must be read from vcpkg after
-          # install and recorded here, not assumed from the upstream release.
-          Invoke-WebRequest -Uri "https://github.com/openssl/openssl/archive/refs/tags/openssl-3.5.1.tar.gz" `
-            -OutFile "source-pack\openssl-3.5.1.tar.gz" -UseBasicParsing
+          # OpenSSL, Boost and zlib come from vcpkg's own downloads/ -- the exact
+          # archives it fetched and SHA512-verified before building them.
+          # Re-downloading them by hardcoded version instead publishes whatever a
+          # human last typed, which no step compares against what was linked.
+          Copy-Item vcpkg\downloads\* source-pack\vcpkg-sources\ -Recurse -Force
+          $vendored = @(Get-ChildItem source-pack\vcpkg-sources -File -Recurse)
+          if ($vendored.Count -lt 10) {
+            throw "Vendored only $($vendored.Count) vcpkg source archives. That directory is the Corresponding Source for every vcpkg-built library; a short copy ships a pack that does not correspond to the binary."
+          }
+          Write-Host "Vendored $($vendored.Count) vcpkg source archives"
 
-          Invoke-WebRequest -Uri "https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2" `
-            -OutFile "source-pack\boost_1_86_0.tar.bz2" -UseBasicParsing
-
-          Invoke-WebRequest -Uri "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz" `
-            -OutFile "source-pack\zlib-v1.3.1.tar.gz" -UseBasicParsing
+          # The port list is a build input and must be reproducible from the pack.
+          Copy-Item nox-build\windows\vcpkg-ports.txt source-pack\build\
 
           # See the Linux pack step: ref_name carries a '/' on a dispatch, and
           # this step is unguarded so the rehearsal exercises it. Unchanged on a
@@ -606,8 +667,10 @@ jobs:
           $packver = "${{ github.ref_name }}".Replace('/', '-')
           $pack = "qbittorrent-nox-win-x64-corresponding-source-$packver.tar.gz"
           tar czf $pack source-pack
-          (Get-FileHash $pack -Algorithm SHA256).Hash.ToLower() + "  $pack" |
-            Set-Content "$pack.sha256"
+          # Written with an explicit LF: Set-Content terminates CRLF, and GNU
+          # sha256sum -c then reads the CR as part of the filename and fails.
+          $hash = (Get-FileHash $pack -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$pack.sha256", "$hash  $pack`n")
           "PACK=$pack" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # The zip lives INSIDE the guarded upload step, not in a step of its own.
@@ -618,26 +681,34 @@ jobs:
       - name: Upload the Windows artifacts
         if: github.event_name == 'push' && github.ref_type == 'tag'
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           $zip = "qbittorrent-nox-win-x64-${{ github.ref_name }}.zip"
           Compress-Archive -Path engine-bundle\* -DestinationPath $zip -Force
-          gh release upload $env:GITHUB_REF_NAME $zip $env:PACK "$env:PACK.sha256" --clobber
+          # The zip is the artifact users execute; without this it is the only
+          # published file with no integrity anchor.
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$zip.sha256", "$zipHash  $zip`n")
+          gh release upload $env:GITHUB_REF_NAME $zip "$zip.sha256" $env:PACK "$env:PACK.sha256" --clobber
 
   # ---------------------------------------------------------------------------
   assert-release-complete:
     name: Assert the release is complete
-    needs: [publish-linux, publish-windows]
+    needs: [verify, publish-linux, publish-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: read
     # !cancelled() rather than the default success(). A failed publish job would
     # otherwise SKIP this job -- which is exactly the case it exists for: the
     # release would already carry one platform's binary and pack, and the check
     # that would have named the gap would never run.
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          fetch-tags: true
+      # No checkout: this job reads only release assets and the registry, and
+      # `git apply --check` works outside a repository. A full-depth clone here
+      # costs a few hundred MiB to read nothing.
 
       # The Corresponding Source travels with every artifact carrying the engine
       # binary, or is served at the same place. A release carrying a binary
@@ -653,41 +724,66 @@ jobs:
             "qbittorrent-nox-linux-corresponding-source-$GITHUB_REF_NAME.tar.gz.sha256" \
             "qbittorrent-nox-win-x64-corresponding-source-$GITHUB_REF_NAME.tar.gz" \
             "qbittorrent-nox-win-x64-corresponding-source-$GITHUB_REF_NAME.tar.gz.sha256" \
+            "qbittorrent-nox-win-x64-$GITHUB_REF_NAME.zip.sha256" \
             "image-digest.txt"; do
             grep -qxF "$want" assets.txt || { echo "::error::missing release asset: $want"; exit 1; }
           done
 
-      # A GHCR digest is not a release asset, so this is a separate check.
-      - name: Check the image is in the registry
-        run: docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A GHCR digest is not a release asset, so this is a separate check. It
+      # also reconciles the tag against the digest the release advertises: a tag
+      # re-pushed between publish and now leaves consumers pinning a digest the
+      # tag no longer resolves to, and the pin is the artifact's identity.
+      - name: Check the image is in the registry and matches the recorded digest
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --clobber --pattern 'image-digest.txt'
+          RECORDED=$(tr -d '[:space:]' < image-digest.txt)
+          PUBLISHED=$(docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" --format '{{.Manifest.Digest}}')
+          echo "recorded=$RECORDED published=$PUBLISHED"
+          [ -n "$PUBLISHED" ] || { echo "::error::registry returned no digest for $IMAGE:$GITHUB_REF_NAME"; exit 1; }
+          [ "$RECORDED" = "$PUBLISHED" ] \
+            || { echo "::error::$IMAGE:$GITHUB_REF_NAME resolves to $PUBLISHED but the release records $RECORDED"; exit 1; }
 
       - name: Verify the checksums
         run: |
           set -euo pipefail
           gh release download "$GITHUB_REF_NAME" --clobber \
-            --pattern '*corresponding-source-*.tar.gz' \
-            --pattern '*corresponding-source-*.tar.gz.sha256'
+            --pattern '*.tar.gz' --pattern '*.sha256' --pattern '*.zip'
           for f in *.sha256; do sha256sum -c "$f"; done
 
       # Asserting an asset EXISTS says nothing about whether it is the source of
       # the thing beside it, and correspondence is the entire licence claim.
       # Done in CI on every release rather than once by hand.
-      - name: Verify the Linux pack corresponds to its own tarball
+      - name: Verify each pack corresponds to its own tarball
+        env:
+          # From verify, not re-derived. The inline `${REF%-mod.*}` form yields
+          # the whole ref unchanged on an unexpected shape, which is how this
+          # check starts passing against the wrong tree.
+          UPSTREAM_TAG: ${{ needs.verify.outputs.upstream_tag }}
         run: |
           set -euo pipefail
-          CHECK="$(mktemp -d)"
-          tar xzf "qbittorrent-nox-linux-corresponding-source-$GITHUB_REF_NAME.tar.gz" -C "$CHECK"
-          TAG="${GITHUB_REF_NAME%-mod.*}"
-          mkdir -p "$CHECK/tree"
-          tar xzf "$CHECK/source-pack/qbittorrent-$TAG.tar.gz" -C "$CHECK/tree" --strip-components=1
-          # Absolute paths: git -C changes the working directory, so a relative
-          # patch path would resolve against the extracted tree, not the runner's.
-          PATCHES="$(ls "$CHECK"/source-pack/patches/*.patch)"
-          [ -n "$PATCHES" ] || { echo "::error::the pack carries no patches; a delta of nothing is not a correspondence proof"; exit 1; }
-          # shellcheck disable=SC2086
-          git -C "$CHECK/tree" apply --check $PATCHES \
-            || { echo "::error::the pack's patches do not apply to the pack's own pristine tarball"; exit 1; }
-          echo "PASS: the Linux pack's delta applies to its own upstream tarball"
+          for platform in linux win-x64; do
+            PACK="qbittorrent-nox-$platform-corresponding-source-$GITHUB_REF_NAME.tar.gz"
+            CHECK="$(mktemp -d)"
+            tar xzf "$PACK" -C "$CHECK"
+            mkdir -p "$CHECK/tree"
+            tar xzf "$CHECK/source-pack/qbittorrent-$UPSTREAM_TAG.tar.gz" \
+              -C "$CHECK/tree" --strip-components=1
+            # Absolute paths: git -C changes the working directory, so a relative
+            # patch path would resolve against the extracted tree.
+            PATCHES="$(ls "$CHECK"/source-pack/patches/*.patch)"
+            [ -n "$PATCHES" ] || { echo "::error::$platform pack carries no patches; a delta of nothing is not a correspondence proof"; exit 1; }
+            # shellcheck disable=SC2086
+            git -C "$CHECK/tree" apply --check $PATCHES \
+              || { echo "::error::the $platform pack's patches do not apply to its own pristine tarball"; exit 1; }
+            echo "PASS: the $platform pack's delta applies to its own upstream tarball"
+          done
 
       # Only this step un-drafts. Reached only when every check above passed.
       - name: Publish the release
