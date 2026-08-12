@@ -75,6 +75,12 @@ from and how many modifications have been applied.
    the old hunk.
 8. Re-run the full discovery. Expected `OK`.
 9. Update `MODIFICATIONS.md` — new tag, new date, new line ranges.
+9a. **Review the SHA-pinned actions in `publish-nox.yml`.** Every `uses:` is
+    pinned to a commit, which is the only immutable form — a tag can be moved by
+    anyone who gains access to the action's repository, and this workflow runs
+    with `contents: write` and `packages: write`. Measured 2026-08-12: Dependabot
+    does not bump SHA-pinned actions, so nothing does this for you. Resolve each
+    trailing version comment to the current release and re-pin deliberately.
 10. **Re-point the repository's default branch to `hardened/<new-tag>`.** Until
     this runs, `workflow_dispatch` cannot reach the new branch's workflow,
     Dependabot watches the old branch's Dockerfile, and any schedule resolves
