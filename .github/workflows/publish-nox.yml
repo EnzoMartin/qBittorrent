@@ -1,20 +1,13 @@
 # Publish qbittorrent-nox: a Linux container image and a Windows bundle, each
 # with its own Corresponding Source pack.
 #
-# ONE workflow, not two. Two workflows firing on the same tag would race to
-# create one Release, and neither's completeness assertion could know whether the
-# other had finished. A single needs: DAG removes that by construction and yields
-# one terminal assertion covering the whole release. runs-on is per-job, so a
-# Windows job beside a Linux job in one file is ordinary.
+# Splitting this into a per-platform workflow pair races two runs to create one
+# Release, and neither's completeness check can see the other's assets.
 #
-# A workflow_dispatch is a REHEARSAL and is measure-only by construction: every
-# publishing step carries a ref predicate that is false on a dispatch, so the run
-# compiles, tests and measures everything while writing nothing public.
-#
-# Guards are STEP-level, never job-level. GitHub skips every job that needs: a
-# skipped job, so a job-level guard on create-release would skip both publish
-# jobs and the assertion with it -- the run would execute only `verify`, report
-# success, and the rehearsal would silently measure nothing.
+# Guards are step-level. A job-level guard on create-release skips both publish
+# jobs and the completeness check with it, leaving a run that executes only
+# `verify` and reports success -- so a workflow_dispatch rehearsal, which is
+# measure-only by construction, would silently measure nothing.
 
 name: publish-nox
 
@@ -45,6 +38,10 @@ env:
   IMAGE: ghcr.io/enzomartin/qbittorrent-nox
   LT_TAG: v2.0.13
   QBT_WEBAPI_MIN: '2.15.1'
+  # vcpkg release 2026.07.29, as an immutable commit. A tag can be moved; a
+  # commit cannot, and this one decides every port version the Windows build
+  # links. Bump it deliberately -- nothing bumps it automatically.
+  VCPKG_REF: 9e593bb18ea69cc5095e012465dcd675a822ed0d
   # Static libraries, dynamic CRT (/MD). MSVC_RUNTIME_DYNAMIC=ON uses /MD, and
   # mixing /MT from x64-windows-static with /MD is undefined CRT behaviour.
   VCPKG_TRIPLET: x64-windows-static-md
@@ -150,13 +147,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assert the image reference is lowercase
+      - name: Assert the image reference is lowercase and derive the tag
+        id: ref
         run: |
           [ "$IMAGE" = "$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')" ] \
             || { echo "::error::IMAGE '$IMAGE' is not lowercase; the OCI repository-name grammar admits no uppercase"; exit 1; }
+          # An OCI tag admits no '/', and ref_name is the BRANCH on a dispatch.
+          TAG="${GITHUB_REF_NAME//\//-}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Image reference: $IMAGE:$TAG"
 
-      # Built and loaded locally first, so the runtime assertions below run
-      # against the image BEFORE it can reach the registry.
+      # One build. The assertions below run against this image and the push step
+      # publishes it unrebuilt. Splitting this into a build-then-rebuild-to-push
+      # pair publishes bytes nothing asserted: the second build re-runs apt-get
+      # update and resolves different packages.
+      #
+      # Labels belong on the build. org.opencontainers.image.source must exist at
+      # first push or the package does not inherit the repository's permissions,
+      # and linking it afterwards does not grant them. documentation carries the
+      # GPLv3 §6(d) directions, which for a registry live in image metadata.
+      # licenses cannot express the OpenSSL exception -- SPDX lists no identifier
+      # for it -- so do not invent a WITH clause; COPYING carries it.
+      #
+      # Add no cache-from/cache-to: it serves a stale apt layer into a published
+      # security artifact.
       - name: Build the image
         uses: docker/build-push-action@v6
         with:
@@ -164,25 +178,24 @@ jobs:
           file: nox-build/linux/Dockerfile
           load: true
           push: false
-          tags: nox-engine:candidate
+          tags: ${{ env.IMAGE }}:${{ steps.ref.outputs.tag }}
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.source=https://github.com/EnzoMartin/qBittorrent
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.documentation=https://github.com/EnzoMartin/qBittorrent/releases/tag/${{ github.ref_name }}
 
-      # The Windows half asserts its floors; without this the Linux half would
-      # assert nothing, and the only 404 proof of the scope removal would be a
-      # developer running it by hand against a local tag.
-      #
-      # The 404 must be observed AUTHENTICATED. doProcessRequest throws
+      # The 404 counts only when authenticated. doProcessRequest throws
       # ForbiddenHTTPError before the controller lookup, so an unauthenticated
-      # probe answers 403 against a pristine engine too: a 403 here is
-      # INCONCLUSIVE, never a pass. The 200 on app/webapiVersion in the same
-      # session is what makes the 404 mean anything.
+      # probe answers 403 against a pristine engine too -- accepting 403 here
+      # reports the scope removed on a build that still carries it.
       #
-      # The API key is qbt_ + exactly 28 characters. Utils::APIKey::isValid
-      # requires the prefix and a total length of exactly 32; a short key is
-      # silently ignored, no session is created, and every call answers 403 --
-      # which surfaces as a readiness timeout, not as an auth error.
+      # The key is qbt_ + exactly 28 characters (Utils::APIKey::isValid requires
+      # 32 total). Shortening it is silently ignored and surfaces as a readiness
+      # timeout, not an auth error.
       #
-      # On Linux the config file is qBittorrent.conf, not .ini: QSettings picks
-      # the name by platform.
+      # QSettings picks the config name by platform: qBittorrent.conf here, not
+      # .ini.
       - name: Assert the built image's runtime floors
         run: |
           set -euo pipefail
@@ -202,7 +215,7 @@ jobs:
           WebUI\\APIKey=$KEY
           CONF
 
-          CID=$(docker run -d -p 18765:18765 -v "$PROF:/profile" nox-engine:candidate \
+          CID=$(docker run -d -p 18765:18765 -v "$PROF:/profile" ${{ env.IMAGE }}:${{ steps.ref.outputs.tag }} \
             --profile=/profile --webui-port=18765 --confirm-legal-notice)
           trap 'docker logs "$CID" || true; docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
@@ -237,34 +250,22 @@ jobs:
             *)   echo "::error::search/plugins returned $CODE; the registration survived somewhere the source scan did not look"; exit 1 ;;
           esac
 
+      # Pushes the image built above; does not rebuild.
       - name: Push the image
         if: github.event_name == 'push' && github.ref_type == 'tag'
         id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: nox-build/linux/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
-          # org.opencontainers.image.source is load-bearing beyond metadata: a
-          # package inherits its repository's permissions automatically only if
-          # linked BEFORE publish. Connecting one afterwards retains its existing
-          # permissions instead. The first push is the only cheap moment.
-          #
-          # documentation discharges a licence duty. GPLv3 §6(d) requires "clear
-          # directions next to the object code"; for an image on a registry that
-          # is the image's own metadata and its package page, not a README.
-          #
-          # licenses carries GPL-3.0-or-later because BINARY distribution is v3+
-          # per upstream COPYING. SPDX has no listed identifier for qBittorrent's
-          # OpenSSL linking exception, so the label cannot express it -- the
-          # exception's text travels in COPYING inside the source pack, and the
-          # documentation label leads a reader there. Do not invent a WITH clause.
-          labels: |
-            org.opencontainers.image.version=${{ github.ref_name }}
-            org.opencontainers.image.source=https://github.com/EnzoMartin/qBittorrent
-            org.opencontainers.image.licenses=GPL-3.0-or-later
-            org.opencontainers.image.documentation=https://github.com/EnzoMartin/qBittorrent/releases/tag/${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          REF="$IMAGE:${{ steps.ref.outputs.tag }}"
+          docker push "$REF"
+          DIGEST=$(docker inspect --format '{{ index .RepoDigests 0 }}' "$REF" | cut -d@ -f2)
+          # An empty digest reaches image-digest.txt and is consumed as the pin.
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::could not read a digest for $REF after push; got '$DIGEST'"; exit 1 ;;
+          esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published $IMAGE@$DIGEST"
 
       # The manifest is generated from the FINISHED image, not the builder. It
       # describes the layer set actually conveyed at the registry hop rather
@@ -282,7 +283,7 @@ jobs:
           cp -r nox-build source-pack/build/nox-build
           rm -rf source-pack/build/nox-build/tests/__pycache__
           cp .github/workflows/publish-nox.yml source-pack/build/
-          docker run --rm --entrypoint dpkg-query nox-engine:candidate \
+          docker run --rm --entrypoint dpkg-query ${{ env.IMAGE }}:${{ steps.ref.outputs.tag }} \
             -W -f='${Package} ${Version} ${source:Package}\n' > source-pack/installed-packages.txt
           # github.ref_name is the TAG on a publish but the BRANCH on a dispatch,
           # and the branch carries a '/', which tar reads as a path into a
@@ -340,63 +341,51 @@ jobs:
         with:
           arch: x64
 
+      # Restored before the clone so a hit removes the bootstrap download and
+      # every port archive fetch. Caches source archives only: extending this to
+      # built packages serves stale output into a published artifact.
+      - name: Restore the vcpkg download cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg/downloads
+            vcpkg/vcpkg.exe
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-${{ hashFiles('nox-build/windows/vcpkg-ports.txt') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_REF }}-
+
+      # Detached at a pinned commit. Cloning master lets every port version move
+      # between releases of one engine version, and makes the cache key above
+      # match across differing port sets.
       - name: Bootstrap vcpkg
         run: |
           git clone https://github.com/microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          git -C vcpkg checkout --detach ${{ env.VCPKG_REF }}
+          if (-not (Test-Path vcpkg\vcpkg.exe)) {
+            .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          } else {
+            Write-Host "vcpkg.exe restored from cache; skipping bootstrap download"
+          }
 
-      # An explicit port list, NOT the `boost` meta-port. The meta-port builds
-      # the whole collection and dominated this job's wall-clock: it was measured
-      # at 162 minutes and the job was cancelled at 60. The narrowed list below
-      # completed in 8m38s (measured 2026-08-12), so no binary cache is needed
-      # and none is configured.
+      # Ports come from nox-build/windows/vcpkg-ports.txt, which states why each
+      # is there. Restoring the `boost` meta-port in its place costs 162 minutes
+      # against about nine.
       #
-      # The Boost entries are taken from vcpkg's own `libtorrent` port manifest
-      # (ports/libtorrent/vcpkg.json), which is the authoritative statement of
-      # what libtorrent needs. Deriving them instead from find_package(...
-      # COMPONENTS ...) declarations does NOT work and was tried first: libtorrent
-      # includes several Boost headers directly without declaring them to CMake,
-      # so that list omitted boost-variant and the build died at
-      # polymorphic_socket.hpp with "Cannot open include file
-      # 'boost/variant/variant.hpp'".
-      #
-      # Two ports are needed BEYOND that manifest, for qBittorrent itself, and
-      # neither is discoverable from its CMake: it declares find_package(Boost
-      # REQUIRED) with no COMPONENTS (cmake/Modules/CheckPackages.cmake), so the
-      # declaration names nothing. boost-stacktrace is required because the
-      # configure below passes -DSTACKTRACE=ON, which pulls in
-      # src/app/stacktrace.cpp and its boost/stacktrace.hpp include; drop that
-      # option and this port becomes unnecessary. boost-circular-buffer is
-      # likewise a direct include rather than a declared component.
-      #
-      # The lesson generalises: this list is maintained by BUILDING, not by
-      # reading CMake. The `boost` meta-port hid every one of these by
-      # installing the whole collection.
-      #
-      # Add no VCPKG_BINARY_SOURCES here. The x-gha backend has been removed,
-      # and the NuGet replacement costs a feed, packages:write on a second
-      # surface, and mono, for a problem the measurement above says we do not have.
+      # Add no VCPKG_BINARY_SOURCES: that is a binary cache needing a NuGet feed,
+      # a second packages:write surface and mono. The cache above is an asset
+      # cache and already removes the downloads.
       - name: Install Boost, OpenSSL, zlib via vcpkg
         run: |
-          .\vcpkg\vcpkg.exe install `
-            "boost-asio:${{ env.VCPKG_TRIPLET }}" `
-            "boost-chrono:${{ env.VCPKG_TRIPLET }}" `
-            "boost-circular-buffer:${{ env.VCPKG_TRIPLET }}" `
-            "boost-config:${{ env.VCPKG_TRIPLET }}" `
-            "boost-crc:${{ env.VCPKG_TRIPLET }}" `
-            "boost-date-time:${{ env.VCPKG_TRIPLET }}" `
-            "boost-iterator:${{ env.VCPKG_TRIPLET }}" `
-            "boost-logic:${{ env.VCPKG_TRIPLET }}" `
-            "boost-multi-index:${{ env.VCPKG_TRIPLET }}" `
-            "boost-multiprecision:${{ env.VCPKG_TRIPLET }}" `
-            "boost-pool:${{ env.VCPKG_TRIPLET }}" `
-            "boost-random:${{ env.VCPKG_TRIPLET }}" `
-            "boost-scope-exit:${{ env.VCPKG_TRIPLET }}" `
-            "boost-stacktrace:${{ env.VCPKG_TRIPLET }}" `
-            "boost-system:${{ env.VCPKG_TRIPLET }}" `
-            "boost-variant:${{ env.VCPKG_TRIPLET }}" `
-            "openssl:${{ env.VCPKG_TRIPLET }}" `
-            "zlib:${{ env.VCPKG_TRIPLET }}"
+          $ports = Get-Content nox-build\windows\vcpkg-ports.txt |
+                   ForEach-Object { $_.Trim() } |
+                   Where-Object { $_ -and -not $_.StartsWith('#') }
+          if ($ports.Count -lt 10) {
+            throw "Read only $($ports.Count) ports from vcpkg-ports.txt. That file is the port set; a short read means it moved or the parse broke, and installing a partial set fails later at a confusing place."
+          }
+          Write-Host "Installing $($ports.Count) ports:`n$($ports -join "`n")"
+          $args = $ports | ForEach-Object { "${_}:${{ env.VCPKG_TRIPLET }}" }
+          & .\vcpkg\vcpkg.exe install @args
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
 
       # --recurse-submodules is required, not an optimisation: deps/try_signal
       # is a submodule and CMakeLists.txt:548 lists try_signal.cpp in the

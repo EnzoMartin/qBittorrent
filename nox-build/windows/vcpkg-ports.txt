@@ -1,0 +1,45 @@
+# vcpkg ports the Windows build installs, one per line.
+#
+# This list is DATA, not workflow text, for two reasons: it is the cache key for
+# the downloaded archives, so it must change only when the ports change; and it
+# is the single place the port set is written down.
+#
+# It is maintained by BUILDING, not by reading CMake. Three sources are each
+# individually insufficient:
+#
+#   * find_package(... COMPONENTS ...) declarations name nothing useful here --
+#     qBittorrent declares find_package(Boost REQUIRED) with no components at
+#     all (cmake/Modules/CheckPackages.cmake);
+#   * vcpkg's own ports/libtorrent/vcpkg.json covers libtorrent's needs but not
+#     qBittorrent's;
+#   * qBittorrent's option-gated needs appear in neither -- boost-stacktrace is
+#     required only because the configure step passes -DSTACKTRACE=ON.
+#
+# The `boost` meta-port hid all of this by installing the whole collection, at a
+# measured cost of 162 minutes against about nine for this list. Adding a port
+# speculatively re-approaches that cost; removing one is only safe if a build
+# then succeeds.
+
+# libtorrent -- from vcpkg's ports/libtorrent/vcpkg.json
+boost-asio
+boost-chrono
+boost-config
+boost-crc
+boost-date-time
+boost-iterator
+boost-logic
+boost-multi-index
+boost-multiprecision
+boost-pool
+boost-random
+boost-scope-exit
+boost-system
+boost-variant
+
+# qBittorrent -- direct includes, declared to CMake nowhere
+boost-circular-buffer
+boost-stacktrace
+
+# Linked libraries
+openssl
+zlib
