@@ -1,0 +1,4 @@
+# These tests are the first Python in the tree, and upstream's root .gitignore
+# has no entry for bytecode. Scoped here rather than added there to keep this
+# branch's diff against the upstream tag limited to files we own.
+__pycache__/
