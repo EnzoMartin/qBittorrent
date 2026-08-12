@@ -1,6 +1,22 @@
 version: 2
 
 updates:
+  # The published qbittorrent-nox image is a production artifact, and its base
+  # is a distribution release that will eventually reach end of life. An
+  # unmonitored base image forfeits the argument for carrying a patched engine
+  # at all: the reason to build from source rather than consume a stock binary
+  # is that the patch stream stays current, and a stale base contradicts that.
+  - package-ecosystem: "docker"
+    directory: "/nox-build/linux"
+    commit-message:
+      prefix: "nox build"
+    groups:
+      docker:
+        patterns:
+          - "*"
+    schedule:
+      interval: "monthly"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     commit-message:
