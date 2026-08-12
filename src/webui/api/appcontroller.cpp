@@ -689,16 +689,6 @@ void AppController::setPreferencesAction()
         pref->setMailNotificationSMTPUsername(it.value().toString());
     if (hasKey(u"mail_notification_password"_s))
         pref->setMailNotificationSMTPPassword(it.value().toString());
-    // Run an external program on torrent added
-    if (hasKey(u"autorun_on_torrent_added_enabled"_s))
-        pref->setAutoRunOnTorrentAddedEnabled(it.value().toBool());
-    if (hasKey(u"autorun_on_torrent_added_program"_s))
-        pref->setAutoRunOnTorrentAddedProgram(it.value().toString().trimmed());
-    // Run an external program on torrent finished
-    if (hasKey(u"autorun_enabled"_s))
-        pref->setAutoRunOnTorrentFinishedEnabled(it.value().toBool());
-    if (hasKey(u"autorun_program"_s))
-        pref->setAutoRunOnTorrentFinishedProgram(it.value().toString().trimmed());
 
     // Connection
     // Listening Port
