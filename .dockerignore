@@ -1,0 +1,13 @@
+# Docker resolves .dockerignore beside the CONTEXT root, not beside the
+# Dockerfile, and nox-build/linux/Dockerfile takes the repository root as its
+# context so it can COPY the tree it builds from.
+#
+# Keep this list minimal. Nothing CMake reads may be excluded: the root
+# CMakeLists.txt calls add_subdirectory(dist) unconditionally — unlike
+# add_subdirectory(test), which sits inside if (TESTING) — and
+# dist/unix/CMakeLists.txt installs man pages from ${PROJECT_SOURCE_DIR}/doc/.
+# Excluding dist or doc fails the build at configure with "add_subdirectory
+# given source 'dist' which is not an existing directory", after the image has
+# already spent the apt and libtorrent layers.
+.git
+nox-build/tests
