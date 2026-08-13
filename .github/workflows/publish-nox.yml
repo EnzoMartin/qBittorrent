@@ -327,6 +327,22 @@ jobs:
           cp .github/workflows/publish-nox.yml source-pack/build/
           docker run --rm --entrypoint dpkg-query ${{ env.IMAGE }}:${{ steps.ref.outputs.tag }} \
             -W -f='${Package} ${Version} ${source:Package}\n' > source-pack/installed-packages.txt
+          # What this build actually resolved, written from the values the run
+          # used. pins.json ships in build/ as well, but it states what was
+          # REQUESTED; a reader holding only the pack cannot otherwise tell
+          # whether a tag moved between the pin and the build, nor which runner
+          # image supplied the toolchain -- no pin file names that.
+          {
+            echo "engine-version=$GITHUB_REF_NAME"
+            echo "source-commit=$GITHUB_SHA"
+            echo "upstream-tag=$UPSTREAM_TAG"
+            echo "libtorrent-tag=${{ needs.verify.outputs.lt_tag }}"
+            echo "libtorrent-commit=${{ needs.verify.outputs.lt_commit }}"
+            echo "floor-libtorrent=${{ needs.verify.outputs.floor_libtorrent }}"
+            echo "floor-webapi=${{ needs.verify.outputs.floor_webapi }}"
+            echo "runner-image=${ImageOS:-unset}/${ImageVersion:-unset}"
+          } > source-pack/pins-resolved.txt
+          cat source-pack/pins-resolved.txt
           # github.ref_name is the TAG on a publish but the BRANCH on a dispatch,
           # and the branch carries a '/', which tar reads as a path into a
           # directory that does not exist. This step is deliberately unguarded so
@@ -723,6 +739,39 @@ jobs:
           # The port list is a build input and must be reproducible from the pack.
           Copy-Item nox-build\windows\vcpkg-ports.txt source-pack\build\
           Copy-Item nox-build\pins.json source-pack\build\
+
+          # What this build actually resolved. pins.json ships beside this and
+          # states what was REQUESTED; the MSVC toolset and Windows SDK are
+          # chosen by the runner image, which no pin file names and nothing else
+          # in this pack records -- so without this the Windows pack cannot say
+          # which compiler produced the binary it accompanies.
+          Get-ChildItem env: |
+            Where-Object { $_.Name -match '^(VCToolsVersion|WindowsSDKVersion|VSCMD_VER|ImageOS|ImageVersion)$' } |
+            ForEach-Object { Write-Host "  $($_.Name)=$($_.Value)" }
+          $toolset = $env:VCToolsVersion
+          $sdk     = $env:WindowsSDKVersion
+          # Refused rather than recorded as empty: a pack naming an unknown
+          # toolchain reads as though the toolchain were captured, which is worse
+          # than not claiming it at all.
+          if (-not $toolset -or -not $sdk) {
+            throw "VCToolsVersion and WindowsSDKVersion are not both set after the MSVC setup step; the pack cannot name the toolchain that built the binary."
+          }
+          @(
+            "engine-version=$env:GITHUB_REF_NAME"
+            "source-commit=$env:GITHUB_SHA"
+            "upstream-tag=$env:UPSTREAM_TAG"
+            "libtorrent-tag=${{ needs.verify.outputs.lt_tag }}"
+            "libtorrent-commit=${{ needs.verify.outputs.lt_commit }}"
+            "vcpkg-commit=${{ needs.verify.outputs.vcpkg_ref }}"
+            "vcpkg-triplet=${{ env.VCPKG_TRIPLET }}"
+            "qt-version=$qtVer"
+            "msvc-toolset=$toolset"
+            "windows-sdk=$($sdk.TrimEnd('\'))"
+            "runner-image=$($env:ImageOS)/$($env:ImageVersion)"
+            "floor-libtorrent=${{ needs.verify.outputs.floor_libtorrent }}"
+            "floor-webapi=${{ needs.verify.outputs.floor_webapi }}"
+          ) | Set-Content -Path source-pack\pins-resolved.txt -Encoding utf8
+          Get-Content source-pack\pins-resolved.txt
 
           # See the Linux pack step: ref_name carries a '/' on a dispatch, and
           # this step is unguarded so the rehearsal exercises it. Unchanged on a
