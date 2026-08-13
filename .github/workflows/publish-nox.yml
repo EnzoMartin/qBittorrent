@@ -770,8 +770,8 @@ jobs:
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' }}
     steps:
       # No checkout: this job reads only release assets and the registry, and
-      # `git apply --check` works outside a repository. A full-depth clone here
-      # costs a few hundred MiB to read nothing.
+      # git-apply(1) does not require the target to be a repository. A full-depth
+      # clone here costs a few hundred MiB to read nothing.
 
       # The Corresponding Source travels with every artifact carrying the engine
       # binary, or is served at the same place. A release carrying a binary
@@ -831,6 +831,7 @@ jobs:
           UPSTREAM_TAG: ${{ needs.verify.outputs.upstream_tag }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
           for platform in linux win-x64; do
             PACK="qbittorrent-nox-$platform-corresponding-source-$GITHUB_REF_NAME.tar.gz"
             CHECK="$(mktemp -d)"
@@ -840,12 +841,21 @@ jobs:
               -C "$CHECK/tree" --strip-components=1
             # Absolute paths: git -C changes the working directory, so a relative
             # patch path would resolve against the extracted tree.
-            PATCHES="$(ls "$CHECK"/source-pack/patches/*.patch)"
-            [ -n "$PATCHES" ] || { echo "::error::$platform pack carries no patches; a delta of nothing is not a correspondence proof"; exit 1; }
-            # shellcheck disable=SC2086
-            git -C "$CHECK/tree" apply --check $PATCHES \
-              || { echo "::error::the $platform pack's patches do not apply to its own pristine tarball"; exit 1; }
-            echo "PASS: the $platform pack's delta applies to its own upstream tarball"
+            PATCHES=("$CHECK"/source-pack/patches/*.patch)
+            [ "${#PATCHES[@]}" -gt 0 ] \
+              || { echo "::error::$platform pack carries no patches; a delta of nothing is not a correspondence proof"; exit 1; }
+            # Applied for real, one patch at a time. NEVER --check here: it turns
+            # off apply, so nothing reaches disk between patches and every patch
+            # is tested against the pristine tree -- the first one that edits a
+            # file an earlier patch created then fails with "No such file or
+            # directory", however sound the series is. git-apply(1) documents no
+            # support for a dependent series; applying for real is what makes the
+            # later patches see the earlier ones.
+            for p in "${PATCHES[@]}"; do
+              git -C "$CHECK/tree" apply "$p" \
+                || { echo "::error::the $platform pack's $(basename "$p") does not apply to its own pristine tarball"; exit 1; }
+            done
+            echo "PASS: the $platform pack's ${#PATCHES[@]}-patch delta applies to its own upstream tarball"
           done
 
       # Only this step un-drafts. Reached only when every check above passed.
