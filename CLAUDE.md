@@ -20,13 +20,15 @@ A maintained fork of qBittorrent carrying **delete-only** source modifications,
 publishing a hardened `qbittorrent-nox` as a container image and as Windows
 Release assets, each accompanied by its Corresponding Source.
 
-Two things are removed, both remote-code-execution surfaces reachable from the
-WebUI API and neither disableable by a build flag:
+Three things are removed from the WebUI API, none disableable by a build flag:
 
 - the search-plugin controller registration (`search/installPlugin` stores and
-  later executes an arbitrary Python file);
+  later executes an arbitrary Python file) — a remote-code-execution surface;
 - the autorun `setPreferences` handlers (an arbitrary program run on torrent
-  add or completion).
+  add or completion) — a remote-code-execution surface;
+- the `ssl_private_key` field from the `SSLParameters` GET response (the
+  per-torrent private key returned to any authenticated API caller) — a
+  credential-disclosure surface.
 
 `MODIFICATIONS.md` at the root is the GPLv3 §5(a) notice and states the bound on
 each claim. `nox-build/` holds the build recipe, the notices and the tests.

@@ -2135,7 +2135,6 @@ void TorrentsController::SSLParametersAction()
     const QJsonObject ret
     {
         {KEY_PROP_SSL_CERTIFICATE, QString::fromLatin1(sslParams.certificate.toPem())},
-        {KEY_PROP_SSL_PRIVATEKEY, QString::fromLatin1(sslParams.privateKey.toPem())},
         {KEY_PROP_SSL_DHPARAMS, QString::fromLatin1(sslParams.dhParams)}
     };
     setResult(ret);

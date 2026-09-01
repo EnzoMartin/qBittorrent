@@ -77,7 +77,33 @@ and the program will be executed on every torrent completion or addition
 (`preferences.cpp:1246-1269`). This is the CVE-2019-13640 class of vulnerability.
 The underlying preference storage in `preferences.cpp` is not removed.
 
-### 3. Repository configuration (`.github/`)
+### 3. SSL private key disclosure (`src/webui/api/torrentscontroller.cpp`)
+
+Line **2138** at `release-5.2.3` was removed from the `SSLParametersAction` GET
+handler — the `KEY_PROP_SSL_PRIVATEKEY` entry in the `QJsonObject ret` initialiser
+that serialised the torrent's private key material into the API response.
+
+**`KEY_PROP_SSL_CERTIFICATE` and `KEY_PROP_SSL_DHPARAMS` are retained deliberately.**
+The certificate is a public artefact; the DH parameters are non-secret. Both remain
+in the response, so the endpoint continues to serve its diagnostic purpose. The
+removal targets only the field that disclosed per-torrent secret key material to any
+caller holding WebUI credentials.
+
+**The constant at `:131` and the three write sites are retained deliberately.** The
+constant `KEY_PROP_SSL_PRIVATEKEY` defined at `:131` is still used by
+`setSSLParametersAction` at `:1159`, `:2146`, and `:2156` to accept and store key
+material. The claimable property is therefore *"the GET endpoint no longer discloses
+the private key"*, **not** *"the key cannot be set"*. The setter and the storage
+path are untouched; a future maintainer should not extend this deletion to the
+constant or the write sites.
+
+**Reason:** `SSLParametersAction` returned `ssl_private_key` — the PEM-encoded
+private key for the torrent's SSL peer configuration — to any authenticated WebUI
+API caller. Private key material is not a diagnostic property of a torrent; it is a
+credential that cannot be revoked without re-keying the torrent. Disclosing it over
+an API with no per-method scope limit violates the principle of least disclosure.
+
+### 4. Repository configuration (`.github/`)
 
 None of this affects the binary. It is disclosed because it is part of this branch's diff
 against the upstream tag, and a reader of the Corresponding Source should find no
@@ -135,5 +161,5 @@ git log --oneline release-5.2.3..HEAD
 git diff release-5.2.3..HEAD -- src/
 ```
 
-The source-side diff is three files and 14 deletions with no insertions. Any insertion
+The source-side diff is four files and 15 deletions with no insertions. Any insertion
 under `src/` contradicts the delete-only claim above.
