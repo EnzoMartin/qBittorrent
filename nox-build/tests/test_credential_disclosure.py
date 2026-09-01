@@ -1,23 +1,13 @@
 """Post-condition for the credential-disclosure deletion in SSLParametersAction.
 
-Every method asserts BOTH halves: the pattern is present at the upstream tag,
-and absent (or, for the retained bound, still present) at HEAD. The tag-side
-assertion is what stops the test passing vacuously -- if upstream renames or
-moves the line we removed, the tag-side assertion fails and the merge is
-reported as a rename rather than as a clean removal. A test that only asserted
-absence at HEAD would go green on a tree where the disclosure had simply moved.
-
-One method asserts that something SURVIVED. It is not redundant. It marks the
-bound on the security claim: the constant definition and the write paths for
-KEY_PROP_SSL_PRIVATEKEY survive, so the claim is "the GET endpoint no longer
-discloses the private key", NOT "the key cannot be set". A future maintainer
-removing the constant or the setter paths would break a documented contract.
+Shared conventions (both-halves assertions, retained-bound methods) are stated
+once, in test_rce_surface.py's module docstring.
 
 DEFECT PROOF (mutation applied and observed 2026-09-01): re-added the line
 "        {KEY_PROP_SSL_PRIVATEKEY, QString::fromLatin1(sslParams.privateKey.toPem())},"
 to src/webui/api/torrentscontroller.cpp in the working tree (between the
 certificate entry and the dhParams entry in SSLParametersAction).
-test_ssl_private_key_not_disclosed failed on the assertNotIn at line 41,
+test_ssl_private_key_not_disclosed failed on the assertNotIn at line 30,
 reporting: AssertionError: 'sslParams.privateKey.toPem()' unexpectedly found
 in [full file text]. Reverting the line returned that test to green. The
 mutation was made and reversed with the Edit tool, not with git, as head_text
