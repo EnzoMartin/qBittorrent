@@ -1,4 +1,4 @@
-"""Post-conditions for the two delete-only source modifications.
+"""Post-conditions for the two remote-code-execution surface deletions.
 
 Every method asserts BOTH halves: the pattern is present at the upstream tag,
 and absent (or, for the two retained bounds, still present) at HEAD. The
