@@ -30,6 +30,11 @@ Three things are removed from the WebUI API, none disableable by a build flag:
   per-torrent private key returned to any authenticated API caller) — a
   credential-disclosure surface.
 
+One thing is removed from the engine itself: the storage of SSL parameters in
+fastresume data. A restored torrent reported a certificate it had never loaded
+into libtorrent and refused every SSL peer. `MODIFICATIONS.md` §4 states the
+mechanism.
+
 `MODIFICATIONS.md` at the root is the GPLv3 §5(a) notice and states the bound on
 each claim. `nox-build/` holds the build recipe, the notices and the tests.
 

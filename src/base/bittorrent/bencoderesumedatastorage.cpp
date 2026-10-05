@@ -73,10 +73,6 @@ namespace BitTorrent
 
 namespace
 {
-    const char KEY_SSL_CERTIFICATE[] = "qBt-sslCertificate";
-    const char KEY_SSL_PRIVATE_KEY[] = "qBt-sslPrivateKey";
-    const char KEY_SSL_DH_PARAMS[] = "qBt-sslDhParams";
-
     template <typename LTStr>
     QString fromLTString(const LTStr &str)
     {
@@ -274,12 +270,6 @@ BitTorrent::LoadResumeDataResult BitTorrent::BencodeResumeDataStorage::loadTorre
 
     torrentParams.stopCondition = Utils::String::toEnum(
             fromLTString(resumeDataRoot.dict_find_string_value("qBt-stopCondition")), Torrent::StopCondition::None);
-    torrentParams.sslParameters =
-    {
-        .certificate = QSslCertificate(toByteArray(resumeDataRoot.dict_find_string_value(KEY_SSL_CERTIFICATE))),
-        .privateKey = Utils::SSLKey::load(toByteArray(resumeDataRoot.dict_find_string_value(KEY_SSL_PRIVATE_KEY))),
-        .dhParams = toByteArray(resumeDataRoot.dict_find_string_value(KEY_SSL_DH_PARAMS))
-    };
 
     const lt::string_view ratioLimitString = resumeDataRoot.dict_find_string_value("qBt-ratioLimit");
     if (ratioLimitString.empty())
@@ -443,13 +433,6 @@ void BitTorrent::BencodeResumeDataStorage::Worker::store(const TorrentID &id, co
     data["qBt-contentLayout"] = Utils::String::fromEnum(resumeData.contentLayout).toStdString();
     data["qBt-firstLastPiecePriority"] = resumeData.firstLastPiecePriority;
     data["qBt-stopCondition"] = Utils::String::fromEnum(resumeData.stopCondition).toStdString();
-
-    if (!resumeData.sslParameters.certificate.isNull())
-        data[KEY_SSL_CERTIFICATE] = resumeData.sslParameters.certificate.toPem().toStdString();
-    if (!resumeData.sslParameters.privateKey.isNull())
-        data[KEY_SSL_PRIVATE_KEY] = resumeData.sslParameters.privateKey.toPem().toStdString();
-    if (!resumeData.sslParameters.dhParams.isEmpty())
-        data[KEY_SSL_DH_PARAMS] = resumeData.sslParameters.dhParams.toStdString();
 
     if (!resumeData.useAutoTMM)
     {
