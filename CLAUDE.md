@@ -62,7 +62,9 @@ from and how many modifications have been applied.
 
 1. `git fetch upstream --tags`
 2. `git switch -c hardened/<new-tag> <new-tag>` — **from the tag, never from the
-   previous branch.**
+   previous branch.** Then `git push origin refs/tags/<new-tag>`: CI checks out
+   from this repository, and the post-condition tests read the pristine tree with
+   `git show <new-tag>:…`, so a tag only upstream holds fails every test there.
 3. `UPSTREAM_TAG=<new-tag> python3 -m unittest discover -s nox-build/tests` —
    expected to **FAIL**. This is the baseline proving the tests are not passing
    vacuously against the new tree.
