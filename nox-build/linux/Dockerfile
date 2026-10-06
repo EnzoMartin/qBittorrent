@@ -6,12 +6,12 @@
 #
 # Pinned versions (must be updated together — see the Windows recipe rationale
 # in .github/workflows/publish-nox.yml for full reasoning):
-#   qBittorrent: this repository's tree, branched from release-5.2.3
+#   qBittorrent: this repository's tree, branched from release-5.2.4
 #   libtorrent:  v2.0.13  (SSL peer-cert exact-match floor; security-load-bearing)
 #   Qt:          6.10.2 from Ubuntu 26.04 apt
 #
 # WHY ubuntu:26.04 (NOT ubuntu:24.04):
-#   qBittorrent release-5.2.3 sets minQt6Version 6.6.0 (CheckPackages.cmake,
+#   qBittorrent release-5.2.4 sets minQt6Version 6.6.0 (CheckPackages.cmake,
 #   REQUIRED). Ubuntu 24.04 ships Qt 6.4.2, which fails the configure check.
 #   Measured 2026-08-12 on ubuntu:26.04: qt6-base-dev candidate 6.10.2+dfsg-7,
 #   which satisfies the floor.

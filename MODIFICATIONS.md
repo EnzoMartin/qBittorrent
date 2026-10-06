@@ -9,11 +9,11 @@
 This file satisfies GPLv3 §5(a): the modified work must carry prominent notices
 stating that you modified it, and giving a relevant date.
 
-**Base:** qBittorrent `release-5.2.3` (WebAPI 2.15.1)
-**Date:** 2026-08-12 (§1–§3); 2026-10-06 (§4)
+**Base:** qBittorrent `release-5.2.4` (WebAPI 2.15.1)
+**Date:** 2026-08-12 (§1–§3); 2026-10-06 (§4; rebased onto `release-5.2.4`)
 
 **Licensing follows upstream's own scoping, which is two-tiered.** Per
-`release-5.2.3:COPYING`, the source is **GPLv2-or-later** and binary distribution
+`release-5.2.4:COPYING`, the source is **GPLv2-or-later** and binary distribution
 is **GPLv3-or-later**, with the **OpenSSL linking exception added in both cases**.
 This fork elects no single version and narrows nothing; the exception matters
 because the source tier is v2+, where Apache-2.0 OpenSSL is not compatible
@@ -47,7 +47,7 @@ link. The claimable property is therefore *"the search API is not reachable"*, *
 
 **Reason:** The search API exposes `search/installPlugin(source)` which stores an
 arbitrary `.py` file and later executes it through a spawned Python interpreter
-(`searchpluginmanager.cpp:548-561` at `release-5.2.3`). This is a live code-execution
+(`searchpluginmanager.cpp:548-561` at `release-5.2.4`). This is a live code-execution
 primitive (`api/searchcontroller.cpp:255-261`). Because qBittorrent's build system
 has no CMake flag to disable the search subsystem — it is compiled into `qbt_base`
 and `qbt_webui` unconditionally — source deletion is the only available build-time
@@ -55,7 +55,7 @@ mitigation.
 
 ### 2. Autorun setPreferences handlers (`src/webui/api/appcontroller.cpp`)
 
-Lines **692–701** at `release-5.2.3` were removed from the `setPreferences` WebUI API
+Lines **692–701** at `release-5.2.4` were removed from the `setPreferences` WebUI API
 handler: the four `autorun_*` field handlers together with the two `// Run an external
 program on …` comments that bound them.
 
@@ -79,7 +79,7 @@ The underlying preference storage in `preferences.cpp` is not removed.
 
 ### 3. SSL private key disclosure (`src/webui/api/torrentscontroller.cpp`)
 
-Line **2138** at `release-5.2.3` was removed from the `SSLParametersAction` GET
+Line **2138** at `release-5.2.4` was removed from the `SSLParametersAction` GET
 handler — the `KEY_PROP_SSL_PRIVATEKEY` entry in the `QJsonObject ret` initialiser
 that serialised the torrent's private key material into the API response.
 
@@ -105,14 +105,14 @@ an API with no per-method scope limit violates the principle of least disclosure
 
 ### 4. SSL parameters in fastresume data (`src/base/bittorrent/bencoderesumedatastorage.cpp`)
 
-Lines **76–78**, **277–282** and **447–452** at `release-5.2.3` were removed:
+Lines **76–78**, **277–282** and **447–452** at `release-5.2.4` were removed:
 - **76–78:** the `KEY_SSL_CERTIFICATE`, `KEY_SSL_PRIVATE_KEY` and `KEY_SSL_DH_PARAMS` key names;
 - **277–282:** the load statement that set a restored torrent's `sslParameters` from them;
 - **447–452:** the three writes that stored a torrent's certificate, private key and DH parameters in its `.fastresume` file.
 
 A restored torrent therefore starts with no SSL parameters. A torrent that is not restarted keeps whatever `torrents/setSSLParameters` gave it.
 
-**Reason: the stored parameters were reported but never loaded.** At `release-5.2.3`, a torrent's parameters reach libtorrent (`set_ssl_certificate_buffer`) only from `TorrentImpl::applySSLParameters`. That runs from `setSSLParameters` and from `SessionImpl::handleTorrentNeedCertAlert`.
+**Reason: the stored parameters were reported but never loaded.** At `release-5.2.4`, a torrent's parameters reach libtorrent (`set_ssl_certificate_buffer`) only from `TorrentImpl::applySSLParameters`. That runs from `setSSLParameters` and from `SessionImpl::handleTorrentNeedCertAlert`.
 - **The alert arrives first.** libtorrent `v2.0.13` posts `torrent_need_cert_alert` from `torrent::init_ssl`, during `torrent_ptr->start()` in `session_impl::add_torrent`. That is *before* the `add_torrent_alert` whose handler creates the `TorrentImpl`.
 - **So the alert is dropped.** The handler finds no torrent and returns.
 - **A re-apply does nothing.** `setSSLParameters` with the restored parameters returns at its equality check.
@@ -159,7 +159,7 @@ unexplained deletions.
   still present. Enumerate them rather than trusting a list here, which will go stale:
 
   ```
-  git ls-tree -r --name-only release-5.2.3 -- src/webui/www/private | grep -i search
+  git ls-tree -r --name-only release-5.2.4 -- src/webui/www/private | grep -i search
   ```
 
 ---
@@ -171,17 +171,17 @@ Check out the upstream tag and apply the commits on this branch:
 ```
 git clone https://github.com/qbittorrent/qBittorrent.git
 cd qBittorrent
-git checkout release-5.2.3
+git checkout release-5.2.4
 git remote add hardened <this repository>
 git fetch hardened
-git cherry-pick release-5.2.3..hardened/hardened/release-5.2.3
+git cherry-pick release-5.2.4..hardened/hardened/release-5.2.4
 ```
 
 Or read the delta directly:
 
 ```
-git log --oneline release-5.2.3..HEAD
-git diff release-5.2.3..HEAD -- src/
+git log --oneline release-5.2.4..HEAD
+git diff release-5.2.4..HEAD -- src/
 ```
 
 The source-side diff is five files and 32 deletions with no insertions. Any insertion

@@ -24,7 +24,7 @@
   ],
 
   "upstream": {
-    "tag": "release-5.2.3"
+    "tag": "release-5.2.4"
   },
 
   "libtorrent": {

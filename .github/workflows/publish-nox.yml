@@ -161,9 +161,7 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --notes "Upstream tag \`${{ needs.verify.outputs.upstream_tag }}\`, modification level from the tag suffix.
 
-          Delete-only source modifications: the search-plugin controller registration and the autorun \`setPreferences\` handlers are removed. Both are remote-code-execution surfaces reachable from the WebUI API and neither is disableable by a build flag.
-
-          See \`MODIFICATIONS.md\` for the exact scope, the bound on each claim, and how to reproduce."
+          Delete-only source modifications against that tag. \`MODIFICATIONS.md\` lists each one with its reason, the bound on each claim, and how to reproduce."
           fi
 
   # ---------------------------------------------------------------------------

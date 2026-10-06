@@ -2,7 +2,7 @@
 
 > **MUST-VERIFY-BEFORE-SHIP: No build of this recipe has ever been executed.**
 > The version numbers, licence attributions, and component descriptions below are
-> derived from source reading at the pinned tags (`release-5.2.3`, `v2.0.13`,
+> derived from source reading at the pinned tags (`release-5.2.4`, `v2.0.13`,
 > `openssl-3.5.1`, `1.86.0`, `1.3.1`). No binary has been produced yet from which
 > actual linked versions could be confirmed. Verify that every version number
 > matches the binary actually shipped before distributing this notice alongside it.
@@ -23,10 +23,12 @@ on physical media rather than downloaded, the archive is on the same medium.
 
 ## qBittorrent (patched)
 
-**Version:** release-5.2.3  
+**Version:** release-5.2.4  
 **Licence:** GNU General Public License version 3 or later (GPLv3+)  
-**Modification:** delete-only patch removing search-plugin and autorun controller
-registrations; see `MODIFICATIONS.md` and `licenses/COPYING` for details.  
+**Modification:** delete-only changes removing the search-plugin controller
+registration, the autorun `setPreferences` handlers, the private key from the
+`SSLParameters` response, and SSL parameters from fastresume data; see
+`MODIFICATIONS.md` and `licenses/COPYING` for details.  
 **Licence texts:** `licenses/COPYING.GPLv3` (GPLv3), `licenses/COPYING.GPLv2` (GPLv2)  
 **Attribution:** `licenses/AUTHORS`
 

@@ -34,7 +34,7 @@ def upstream_tag():
             "UPSTREAM_TAG is not set. These tests compare this tree against the "
             "upstream tag it was branched from, and guessing that tag is how a "
             "post-condition test starts passing vacuously. Set it explicitly, "
-            "e.g. UPSTREAM_TAG=release-5.2.3."
+            "e.g. UPSTREAM_TAG=release-5.2.4."
         )
     return tag
 
