@@ -10,7 +10,7 @@ This file satisfies GPLv3 §5(a): the modified work must carry prominent notices
 stating that you modified it, and giving a relevant date.
 
 **Base:** qBittorrent `release-5.2.3` (WebAPI 2.15.1)
-**Date:** 2026-08-12
+**Date:** 2026-08-12 (§1–§3); 2026-10-06 (§4)
 
 **Licensing follows upstream's own scoping, which is two-tiered.** Per
 `release-5.2.3:COPYING`, the source is **GPLv2-or-later** and binary distribution
@@ -38,7 +38,7 @@ meta-object for every `Q_OBJECT` header listed in a target's sources, so removin
 `.cpp` leaves `mocs_compilation.cpp` referencing slot implementations that no longer exist
 and `qbt_webui` fails at link with one undefined reference per slot.
 
-**`src/base/` is deliberately untouched, and the claim here is bounded accordingly.**
+**The search sources under `src/base/` are deliberately untouched, and the claim here is bounded accordingly.**
 `SearchPluginManager` stays compiled into `qbt_base`, because `src/app/application.cpp`
 calls `SearchPluginManager::freeInstance()` and deleting the base sources breaks the
 link. The claimable property is therefore *"the search API is not reachable"*, **not**
@@ -103,7 +103,30 @@ API caller. Private key material is not a diagnostic property of a torrent; it i
 credential that cannot be revoked without re-keying the torrent. Disclosing it over
 an API with no per-method scope limit violates the principle of least disclosure.
 
-### 4. Repository configuration (`.github/`)
+### 4. SSL parameters in fastresume data (`src/base/bittorrent/bencoderesumedatastorage.cpp`)
+
+Lines **76–78**, **277–282** and **447–452** at `release-5.2.3` were removed:
+- **76–78:** the `KEY_SSL_CERTIFICATE`, `KEY_SSL_PRIVATE_KEY` and `KEY_SSL_DH_PARAMS` key names;
+- **277–282:** the load statement that set a restored torrent's `sslParameters` from them;
+- **447–452:** the three writes that stored a torrent's certificate, private key and DH parameters in its `.fastresume` file.
+
+A restored torrent therefore starts with no SSL parameters. A torrent that is not restarted keeps whatever `torrents/setSSLParameters` gave it.
+
+**Reason: the stored parameters were reported but never loaded.** At `release-5.2.3`, a torrent's parameters reach libtorrent (`set_ssl_certificate_buffer`) only from `TorrentImpl::applySSLParameters`. That runs from `setSSLParameters` and from `SessionImpl::handleTorrentNeedCertAlert`.
+- **The alert arrives first.** libtorrent `v2.0.13` posts `torrent_need_cert_alert` from `torrent::init_ssl`, during `torrent_ptr->start()` in `session_impl::add_torrent`. That is *before* the `add_torrent_alert` whose handler creates the `TorrentImpl`.
+- **So the alert is dropped.** The handler finds no torrent and returns.
+- **A re-apply does nothing.** `setSSLParameters` with the restored parameters returns at its equality check.
+- **The result:** after a restart, every SSL torrent restored from fastresume reported a certificate through the `SSLParameters` GET that libtorrent did not have. It refused every SSL peer until a *different* certificate was set.
+- **After the deletion,** the GET reports no certificate for a restored torrent. A caller that sets the torrent's parameters then reaches `applySSLParameters`, and the context `init_ssl` created already exists.
+
+**This also stops writing every swarm private key to disk**, one per `.fastresume` file in the profile.
+
+**Bounds on the claim:**
+- **SQLite storage is not modified.** It is used only when `BitTorrent\Session\ResumeDataStorageType` is `SQLite`; the default is `Legacy`, which is this file.
+- **`SSLParameters` and the WebUI setter are untouched.** So is the JSON serialisation of `sslParameters` in `addtorrentparams.cpp`, which carries parameters supplied when a torrent is added.
+- **Old files keep their keys until rewritten.** A `.fastresume` file written by an earlier build still holds the old keys until the torrent's next resume-data save rewrites it without them. This build ignores them on load.
+
+### 5. Repository configuration (`.github/`)
 
 None of this affects the binary. It is disclosed because it is part of this branch's diff
 against the upstream tag, and a reader of the Corresponding Source should find no
@@ -128,7 +151,7 @@ unexplained deletions.
 - DHT, LSD, PeX, UPnP, RSS, and IPv6 remain in the binary; they are not build-gated
   upstream and are controlled only by runtime configuration.
 - The WebUI (`WEBUI=ON`) is kept — it is the only control channel for a headless build.
-- `src/base/` is untouched, so `SearchPluginManager` is still compiled in;
+- The search sources under `src/base/` are untouched, so `SearchPluginManager` is still compiled in;
   `src/app/application.cpp` links it. See §1 for the bound this places on the
   security claim.
 - **The WebUI's browser-side search assets remain.** Only the controller registration
@@ -161,5 +184,5 @@ git log --oneline release-5.2.3..HEAD
 git diff release-5.2.3..HEAD -- src/
 ```
 
-The source-side diff is four files and 15 deletions with no insertions. Any insertion
+The source-side diff is five files and 32 deletions with no insertions. Any insertion
 under `src/` contradicts the delete-only claim above.
