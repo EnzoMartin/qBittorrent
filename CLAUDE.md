@@ -94,7 +94,7 @@ from and how many modifications have been applied.
     this runs, `workflow_dispatch` cannot reach the new branch's workflow,
     Dependabot watches the old branch's Dockerfile, and any schedule resolves
     against the old tree.
-11. Tag `<new-tag>-mod.1` and push.
+11. Tag `<new-tag>-mod.1` and push, as `RELEASING.md` describes.
 
 ## Residual: `master` still carries upstream's workflows
 
