@@ -132,10 +132,10 @@ RUN grep -q 'TORRENT_SSL_PEERS' /src/libtorrent/build/compile_commands.json \
 
 # ---- qBittorrent -------------------------------------------------------
 # The source is this repository's own committed tree: upstream at the branched
-# tag, plus the delete-only commits that remove the search API surface and the
-# autorun setPreferences handlers. Building from the tree rather than cloning
-# upstream and patching is what makes the published binary's relationship to
-# upstream checkable — the diff is the branch's own history.
+# tag, plus the delete-only commits and one bounded observability addition
+# (MODIFICATIONS.md). Building from the tree rather than cloning upstream and
+# patching is what makes the published binary's relationship to upstream
+# checkable — the diff is the branch's own history.
 #
 # The build context is the repository root, so .dockerignore at the root governs
 # what arrives here. Nothing CMake reads may be excluded: the root CMakeLists.txt

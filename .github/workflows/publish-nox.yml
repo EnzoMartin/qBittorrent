@@ -161,7 +161,7 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --notes "Upstream tag \`${{ needs.verify.outputs.upstream_tag }}\`, modification level from the tag suffix.
 
-          Delete-only source modifications against that tag. \`MODIFICATIONS.md\` lists each one with its reason, the bound on each claim, and how to reproduce."
+          Delete-only source modifications against that tag, plus one bounded observability addition. \`MODIFICATIONS.md\` lists each one with its reason, the bound on each claim, and how to reproduce."
           fi
 
   # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@
 
 #include "extensiondata.h"
 #include "nativetorrentextension.h"
+#include "peerconnectionlog.h"
 
 namespace
 {
@@ -72,6 +73,11 @@ void NativeSessionExtension::on_alert(const lt::alert *alert)
         break;
     case lt::fastresume_rejected_alert::alert_type:
         handleFastresumeRejectedAlert(static_cast<const lt::fastresume_rejected_alert *>(alert));
+        break;
+    case lt::peer_connect_alert::alert_type:
+    case lt::peer_error_alert::alert_type:
+    case lt::peer_disconnected_alert::alert_type:
+        logPeerConnectionAlert(alert);
         break;
     default:
         break;

@@ -35,11 +35,22 @@ Dockerfile's `WHY ubuntu:26.04` block records the `minQt6Version` 6.6.0 floor
 that decides the base.
 
 **On every upstream version bump:** follow the merge procedure in the root
-`CLAUDE.md`. Re-check the two items verified by reading rather than by test —
-that the deletion sites still match the new source, and that libtorrent's
-SSL peer-certificate comparison is still an exact match rather than a prefix
-compare (`torrent::verify_peer_cert` in `src/torrent.cpp`; upstream's changelog
-does not record that fix, so release notes will not tell you).
+`CLAUDE.md`. Re-check the items verified by reading rather than by test:
+- that the deletion sites still match the new source;
+- that libtorrent's SSL peer-certificate comparison is still an exact match
+  rather than a prefix compare (`torrent::verify_peer_cert` in
+  `src/torrent.cpp`; upstream's changelog does not record that fix, so release
+  notes will not tell you);
+- that `peer_error_alert` is still in the `peer` category and
+  `peer_disconnected_alert`/`peer_connect_alert` still in the `connect` category
+  (`include/libtorrent/alert_types.hpp`);
+- that the two posting sites for these alert types are unchanged: the outgoing
+  path (`peer_connection::disconnect` in `src/peer_connection.cpp`) and the
+  incoming-SSL-handshake path (`session_impl::ssl_handshake` in
+  `src/session_impl.cpp`);
+- that `peer_endpoint_t` is still `tcp::endpoint` in libtorrent 2.0.x (it
+  becomes a variant in 2.1; a handler that reads the endpoint field, rather than
+  using `message()`, needs a `LIBTORRENT_VERSION_NUM >= 20100` branch).
 
 ---
 
