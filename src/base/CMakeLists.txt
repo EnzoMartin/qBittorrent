@@ -28,6 +28,7 @@ add_library(qbt_base STATIC
     bittorrent/nativesessionextension.h
     bittorrent/nativetorrentextension.h
     bittorrent/peeraddress.h
+    bittorrent/peerconnectionlog.h
     bittorrent/peerinfo.h
     bittorrent/portforwarderimpl.h
     bittorrent/resumedatastorage.h
@@ -144,6 +145,7 @@ add_library(qbt_base STATIC
     bittorrent/nativesessionextension.cpp
     bittorrent/nativetorrentextension.cpp
     bittorrent/peeraddress.cpp
+    bittorrent/peerconnectionlog.cpp
     bittorrent/peerinfo.cpp
     bittorrent/portforwarderimpl.cpp
     bittorrent/resumedatastorage.cpp

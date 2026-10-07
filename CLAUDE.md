@@ -16,9 +16,10 @@ cannot afterwards be withdrawn.
 
 ## What this repository is
 
-A maintained fork of qBittorrent carrying **delete-only** source modifications,
-publishing a hardened `qbittorrent-nox` as a container image and as Windows
-Release assets, each accompanied by its Corresponding Source.
+A maintained fork of qBittorrent carrying **delete-only, plus one bounded
+observability addition** (§6 of `MODIFICATIONS.md`), publishing a hardened
+`qbittorrent-nox` as a container image and as Windows Release assets, each
+accompanied by its Corresponding Source.
 
 Three things are removed from the WebUI API, none disableable by a build flag:
 
@@ -81,9 +82,21 @@ from and how many modifications have been applied.
 7. `git cherry-pick <first>..<last>` for the source deletions and the build
    system. **Conflicts here are the signal**, not an obstacle: they mean upstream
    moved the code we remove. Resolve by reading the new source, never by forcing
-   the old hunk.
+   the old hunk. **For the §6 addition commit specifically:** a conflict means
+   upstream moved an anchor (`const lt::alert_category_t alertMask`, the
+   `fastresume_rejected_alert` case, or the `peeraddress` CMake lines). Re-place
+   the insertion at the equivalent anchor in the new source; never force the old
+   hunk.
+7a. **If the `verify` job's tag half fails because upstream now handles
+    `peer_error_alert`/`peer_disconnected_alert` or sets `connect_notification`:**
+    drop the §6 addition. Delete `peerconnectionlog.{h,cpp}`, revert the three
+    upstream-file insertions, and remove §6 from `MODIFICATIONS.md`. The
+    upstream handling is more authoritative and carrying a duplicate is wrong.
 8. Re-run the full discovery. Expected `OK`.
-9. Update `MODIFICATIONS.md` — new tag, new date, new line ranges.
+9. Update `MODIFICATIONS.md` — new tag, new date, new line ranges. Also
+   re-verify the items in `nox-build/README.md`'s *verified by reading* list
+   that depend on the libtorrent version (the alert categories, the two posting
+   sites, and the 2.1 `peer_endpoint_t` change).
 9a. **Check for an open Dependabot pull request against the action pins.** Every
     `uses:` is pinned to a commit, which is the only immutable form — a tag can
     be moved by anyone who gains access to the action's repository, and this

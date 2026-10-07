@@ -23,8 +23,8 @@ without it.
 
 ## What was changed
 
-The following lines were deleted from the qBittorrent source tree. No lines were
-added or modified; these are delete-only changes.
+The following lines were deleted from the qBittorrent source tree, and one
+bounded observability addition was made; see §6 for the addition.
 
 ### 1. Search-plugin controller (`src/webui/CMakeLists.txt`, `src/webui/webapplication.cpp`)
 
@@ -145,7 +145,7 @@ unexplained deletions.
 
 ## What was NOT changed
 
-- No lines were added or modified under `src/` — these are delete-only changes.
+- Under `src/`, only §6's observability addition was made; all other source changes are deletions.
 - The `about.html` notice page, all licence headers, and the OpenSSL linking
   exception in every source file are untouched (GPLv3 §5(d), §4).
 - DHT, LSD, PeX, UPnP, RSS, and IPv6 remain in the binary; they are not build-gated
@@ -184,5 +184,82 @@ git log --oneline release-5.2.4..HEAD
 git diff release-5.2.4..HEAD -- src/
 ```
 
-The source-side diff is five files and 32 deletions with no insertions. Any insertion
-under `src/` contradicts the delete-only claim above.
+The source-side diff is seven files: 32 deletions across five existing files, and
+7 inserted lines across three existing files (`nativesessionextension.cpp`,
+`sessionimpl.cpp`, `src/base/CMakeLists.txt`) plus two new files
+(`peerconnectionlog.h`, `peerconnectionlog.cpp`). Any insertion beyond §6's
+exact set contradicts the claim above.
+
+---
+
+### 6. Peer-connection logging (`src/base/bittorrent/peerconnectionlog.{h,cpp}`)
+
+**Date:** 2026-10-07
+
+**Exact inserted lines in existing upstream files:**
+
+`src/base/bittorrent/sessionimpl.cpp`, `loadLTSettings()`:
+```
+        | lt::alert::connect_notification
+```
+inserted directly after `const lt::alert_category_t alertMask = lt::alert::error_notification`.
+
+`src/base/bittorrent/nativesessionextension.cpp`, `on_alert()`:
+```
+#include "peerconnectionlog.h"
+```
+added after `#include "nativetorrentextension.h"`, and:
+```
+    case lt::peer_connect_alert::alert_type:
+    case lt::peer_error_alert::alert_type:
+    case lt::peer_disconnected_alert::alert_type:
+        logPeerConnectionAlert(alert);
+        break;
+```
+inserted between the `fastresume_rejected_alert` case's `break;` and `default:`.
+
+`src/base/CMakeLists.txt`: `bittorrent/peerconnectionlog.h` added after
+`bittorrent/peeraddress.h`; `bittorrent/peerconnectionlog.cpp` added after
+`bittorrent/peeraddress.cpp`.
+
+**Two new files:** `src/base/bittorrent/peerconnectionlog.h` and
+`src/base/bittorrent/peerconnectionlog.cpp`.
+
+**What this addition does:**
+
+The mask line makes libtorrent post `peer_connect_alert` and
+`peer_disconnected_alert` (the `connect` category), which are not posted today.
+`peer_error_alert` is already in the mask via `peer_notification`. All three alert
+types are routed to `logPeerConnectionAlert`, which is the only reader of them.
+
+`logPeerConnectionAlert`:
+- counts `peer_connect_alert` occurrences without logging each one;
+- logs every `peer_error_alert`;
+- logs a `peer_disconnected_alert` only when `op == operation_t::connect` or the
+  error category is `asio.ssl` — ordinary closes stay out;
+- rate-limits per (alert type, operation, error category name, error value) to one
+  log line per 60-second window on a steady clock, reporting the suppressed count
+  on the next logged line for that key after the window closes;
+- caps the key map at 48 entries, with an overflow key for anything beyond;
+- logs WARNING for SSL-category errors and INFO for all others;
+- writes every line under the stable prefix `peer-connection: `, which consumers
+  of `log/main` parse.
+
+`alert->message()` carries the torrent name (or `" - "` for an incoming handshake
+with no torrent), the endpoint, and the error text. It never carries certificate
+fields — those are only in `torrent_log`, which is not enabled here.
+
+**What this addition does not cover:**
+
+- The specific cause of an SSL failure: the error text is the OpenSSL reason string
+  (`ERR_reason_error_string`), not the certificate's identity or chain detail.
+- Whether the failure is outgoing (a desktop connecting to a seeder) or incoming
+  (a seeder receiving an incoming connection) — only the operation field (`op`)
+  distinguishes them, and `peer_error_alert` for incoming SSL handshake failures
+  carries `op == ssl_handshake` rather than `connect`.
+- The real alert and log volume under load: the cost of the extra `connect_notification`
+  alerts is unmeasured.
+
+**"These lines only log" is a review claim** over `peerconnectionlog.cpp` — a file
+of N lines at review time — and not a tested property. There is no automated test
+for it at this release.

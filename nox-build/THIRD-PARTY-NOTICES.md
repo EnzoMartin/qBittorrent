@@ -27,7 +27,8 @@ on physical media rather than downloaded, the archive is on the same medium.
 **Licence:** GNU General Public License version 3 or later (GPLv3+)  
 **Modification:** delete-only changes removing the search-plugin controller
 registration, the autorun `setPreferences` handlers, the private key from the
-`SSLParameters` response, and SSL parameters from fastresume data; see
+`SSLParameters` response, and SSL parameters from fastresume data; plus one
+bounded observability addition adding peer-connection failure logging; see
 `MODIFICATIONS.md` and `licenses/COPYING` for details.  
 **Licence texts:** `licenses/COPYING.GPLv3` (GPLv3), `licenses/COPYING.GPLv2` (GPLv2)  
 **Attribution:** `licenses/AUTHORS`

@@ -1868,6 +1868,7 @@ lt::settings_pack SessionImpl::loadLTSettings() const
     lt::settings_pack settingsPack;
 
     const lt::alert_category_t alertMask = lt::alert::error_notification
+        | lt::alert::connect_notification
         | lt::alert::file_progress_notification
         | lt::alert::ip_block_notification
         | lt::alert::peer_notification
