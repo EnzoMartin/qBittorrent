@@ -574,7 +574,15 @@ jobs:
           Copy-Item "$qt\Qt6Sql.dll"     engine-bundle\
           Copy-Item "$qt\Qt6Xml.dll"     engine-bundle\
 
-          Copy-Item "${{ env.QT_ROOT_DIR }}\plugins\tls\*" engine-bundle\plugins\tls\
+          # A Qt debug plugin is its release twin's name plus "d"; it imports the
+          # debug Qt and C runtime DLLs, which the bundle does not carry. Match on
+          # the twin, not on a trailing "d": every release backend ends in "nd.dll".
+          Get-ChildItem "${{ env.QT_ROOT_DIR }}\plugins\tls\*.dll" |
+            Where-Object {
+              -not ($_.BaseName.EndsWith('d') -and
+                    (Test-Path (Join-Path $_.DirectoryName ($_.BaseName.Substring(0, $_.BaseName.Length - 1) + '.dll'))))
+            } |
+            ForEach-Object { Copy-Item $_.FullName engine-bundle\plugins\tls\ }
           Copy-Item "${{ env.QT_ROOT_DIR }}\plugins\sqldrivers\qsqlite.dll" `
                     engine-bundle\plugins\sqldrivers\
 

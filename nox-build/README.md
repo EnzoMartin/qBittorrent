@@ -1,12 +1,5 @@
 # Building `qbittorrent-nox`
 
-> **MUST-VERIFY-BEFORE-SHIP: no build of this recipe has been executed yet.**
-> Every version number, path, command and assertion below is derived from source
-> reading at the pinned tags, not from comparing against a real build output. It
-> may contain errors in package names, CMake flags, Qt installer parameters or
-> vcpkg behaviour. Verify by executing the build end to end, recording the actual
-> output, and reconciling any discrepancy before shipping a binary produced by it.
-
 This file is part of the Corresponding Source pack required by GPLv3 §1
 ("including scripts to control those [generate and install] activities").
 
@@ -84,7 +77,8 @@ from `doc/`, so excluding either fails the build at configure.
 
 ### Corresponding Source for the image
 
-The image links Qt, Boost, OpenSSL and zlib as **stock distribution packages**,
+The image links Qt, OpenSSL and zlib as **stock distribution packages** (Boost is
+used at build time as headers only and is not a runtime dependency),
 at versions entirely unlike the vcpkg versions the Windows build uses. Shipping
 the Windows pack as this image's Corresponding Source would publish source that
 does not correspond to the binary, so the Linux pack is its own thing:
@@ -120,11 +114,16 @@ point.
 
 ### Prerequisites
 
-- Windows 10/11 or Windows Server 2022 (the binary is win-x64 only)
-- Visual Studio 2022 (MSVC v143) with the "Desktop development with C++" workload
-- [vcpkg](https://vcpkg.io/) — bootstrapped by the CI workflow; install separately for local builds
-- [Qt 6.10.x](https://www.qt.io/download-open-source) — installed by `jurplel/install-qt-action` in CI; install manually for local builds (dynamic, `win64_msvc2022_64`)
-- Git, CMake ≥ 3.25, Ninja
+- Windows Server 2025 (the binary is win-x64 only; `release-5.2.4-mod.2` was built
+  on image `win25-vs2026/20260925.250.1`)
+- Visual Studio 2026 (VS 18), MSVC toolset 14.51, Windows SDK 10.0.26100.0, with
+  the "Desktop development with C++" workload
+- [vcpkg](https://vcpkg.io/) — check out vcpkg at the `vcpkg.commit` in
+  `nox-build/pins.json`; the CI workflow fetches that exact commit
+- [Qt 6.10.x](https://www.qt.io/download-open-source) — installed by
+  `jurplel/install-qt-action` in CI; install manually for local builds (dynamic,
+  `win64_msvc2022_64`)
+- Git, CMake ≥ 3.20, Ninja
 
 ### 1. Obtain the source
 
@@ -134,11 +133,36 @@ already applied — they are commits, not a patch to be run.
 ### 2. Bootstrap vcpkg
 
 ```powershell
-git clone https://github.com/microsoft/vcpkg.git
+$vcpkgRef = (Get-Content nox-build\pins.json | ConvertFrom-Json).vcpkg.commit
+New-Item -ItemType Directory vcpkg
+git -C vcpkg init
+git -C vcpkg fetch --depth 1 origin $vcpkgRef
+git -C vcpkg checkout --detach FETCH_HEAD
 .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 ```
 
-### 3. Configure
+### 3. Clone and build libtorrent
+
+```powershell
+$lt = Get-Content nox-build\pins.json | ConvertFrom-Json
+git clone --depth 1 --branch $lt.libtorrent.tag `
+    --recurse-submodules --shallow-submodules `
+    https://github.com/arvidn/libtorrent.git lt-src
+# A tag is movable, and this one decides whether SSL peer certificates are
+# compared exactly or by prefix: stop if it no longer resolves to the pinned commit.
+if ((git -C lt-src rev-parse HEAD).Trim() -ne $lt.libtorrent.commit) { throw "libtorrent tag moved" }
+cmake -B lt-src\build -G Ninja -S lt-src `
+    -DCMAKE_BUILD_TYPE=Release `
+    -DBUILD_SHARED_LIBS=OFF `
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+    -DCMAKE_INSTALL_PREFIX="$PWD\lt-install" `
+    -DCMAKE_TOOLCHAIN_FILE="vcpkg\scripts\buildsystems\vcpkg.cmake" `
+    -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake --build lt-src\build --parallel
+cmake --install lt-src\build
+```
+
+### 4. Configure
 
 ```powershell
 cmake -B build -G "Ninja" `
@@ -150,7 +174,7 @@ cmake -B build -G "Ninja" `
   -DMSVC_RUNTIME_DYNAMIC=ON `
   -DCMAKE_TOOLCHAIN_FILE="vcpkg\scripts\buildsystems\vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
-  -DCMAKE_PREFIX_PATH="<path-to-Qt6-install>"
+  -DCMAKE_PREFIX_PATH="$PWD\lt-install;<path-to-Qt6-install>"
 ```
 
 **The triplet is `x64-windows-static-md`, and it is not interchangeable.** Static
@@ -164,7 +188,7 @@ keeps the Qt libraries replaceable and avoids mixed-runtime hazards — not a
 licence requirement; LGPLv3 §4(d) permits either a shared-library form or a
 suitable relinking mechanism.
 
-### 4. Build
+### 5. Build
 
 ```powershell
 cmake --build build --config Release --parallel
@@ -172,7 +196,7 @@ cmake --build build --config Release --parallel
 
 The output is `build\qbittorrent-nox.exe`.
 
-### 5. Stage the bundle
+### 6. Stage the bundle
 
 Copy the following beside `qbittorrent-nox.exe`:
 
@@ -182,7 +206,9 @@ Qt6Core.dll
 Qt6Network.dll
 Qt6Sql.dll
 Qt6Xml.dll
-plugins\tls\*
+plugins\tls\qcertonlybackend.dll
+plugins\tls\qopensslbackend.dll
+plugins\tls\qschannelbackend.dll
 plugins\sqldrivers\qsqlite.dll
 qt.conf
 THIRD-PARTY-NOTICES.md
@@ -192,17 +218,11 @@ licenses\
   COPYING.GPLv3
   AUTHORS
   LGPL-3.0.txt
-  libtorrent-BSD-3-Clause.txt
+  libtorrent-LICENSE.txt
   OpenSSL-Apache-2.0.txt
 ```
 
-**Never copy `vcruntime140.dll`, `msvcp140.dll`, or any other MSVC CRT DLL beside
-the engine.** Doing so forfeits the GPL System Library exception, which is what
-permits linking against a runtime the GPL does not cover. Install the runtime
-separately by running `vc_redist.x64.exe`. The publish workflow asserts this and
-fails the build if either DLL reaches the bundle.
-
-### 6. Verify
+### 7. Verify
 
 Required before shipping any binary:
 
@@ -218,8 +238,7 @@ a pass. Confirm the credential works in the same session by checking that
 
 The WebUI API key must be `qbt_` plus **exactly 28** characters. `Utils::APIKey::isValid`
 requires the prefix and a total length of exactly 32. A short key is silently
-ignored: no session is created, every authenticated call answers 403, and
-nothing in the log names the key as the cause.
+ignored: no session is created and every authenticated call answers 403.
 
 ---
 
