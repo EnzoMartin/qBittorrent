@@ -1,9 +1,5 @@
 # Build qbittorrent-nox (Linux x64) from this repository's tree.
 #
-# MUST-VERIFY-BEFORE-SHIP: No build of this recipe has ever been executed.
-# Every version number, path, library name, and assertion below is derived from
-# source reading only. Verify by running the build and recording the outcome.
-#
 # Pinned versions (must be updated together — see the Windows recipe rationale
 # in .github/workflows/publish-nox.yml for full reasoning):
 #   qBittorrent: this repository's tree, branched from release-5.2.4
@@ -11,10 +7,11 @@
 #   Qt:          6.10.2 from Ubuntu 26.04 apt
 #
 # WHY ubuntu:26.04 (NOT ubuntu:24.04):
-#   qBittorrent release-5.2.4 sets minQt6Version 6.6.0 (CheckPackages.cmake,
-#   REQUIRED). Ubuntu 24.04 ships Qt 6.4.2, which fails the configure check.
-#   Measured 2026-08-12 on ubuntu:26.04: qt6-base-dev candidate 6.10.2+dfsg-7,
-#   which satisfies the floor.
+#   qBittorrent release-5.2.4 sets minQt6Version 6.6.0, set in the root
+#   CMakeLists.txt and required by CheckPackages.cmake. Ubuntu 24.04 ships
+#   Qt 6.4.2, which fails the configure check. Measured 2026-08-12 on
+#   ubuntu:26.04: qt6-base-dev candidate 6.10.2+dfsg-7, which satisfies
+#   the floor.
 #
 # TORRENT_SSL_PEERS:
 #   libtorrent enables SSL peer support (TORRENT_SSL_PEERS) when built with
@@ -34,13 +31,10 @@
 #   CMAKE_INSTALL_PREFIX=/usr/local places libraries at /usr/local/lib
 #   (arch-independent) so the COPY glob is deterministic.
 #
-# MUST-VERIFY-BEFORE-SHIP:
-#   Launch the built nox once against a fresh profile directory and compare the
-#   configuration file it writes against any hand-authored configuration
-#   intended for it. Key names, section headers and QSettings serialisation are
-#   derived from source reading, not from a file the engine actually
-#   generated. Note that QSettings picks the file name by platform: on Linux the
-#   engine reads qBittorrent.conf, not qBittorrent.ini.
+# Configuration file location: on Linux the engine reads qBittorrent.conf;
+#   on Windows and macOS it reads qBittorrent.ini. With --profile qBittorrent
+#   chooses the extension itself (src/base/profile_p.cpp). The release
+#   workflow's runtime-floor step writes these keys and the engine accepts them.
 #   The exact Qt6 runtime library names in the runtime stage below (libqt6*t64)
 #   reflect Ubuntu's package naming; verify `ldd qbittorrent-nox` against the
 #   runtime stage after a successful build and update if they differ.
@@ -166,21 +160,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # The 't64' suffix marks Ubuntu's time64-transition variants and is NOT uniform
 # across the Qt 6 modules: only Core carries it, so naming the others with the
 # suffix aborts the stage.
-# MUST-VERIFY: the Boost runtime package below is known WRONG, and is left in
-# place only so that its replacement is chosen from a measurement rather than
-# from a second guess. Measured against ubuntu:26.04 on 2026-08-12:
-#   * libboost-dev depends on libboost1.90-dev, so the builder links Boost 1.90,
-#     while this line installs the 1.83 runtime — a soname that cannot satisfy it;
-#   * no libboost-system1.90.0 package exists at all, because Boost.System is
-#     header-only at that version.
-# So the correct answer is plausibly to install no Boost runtime here. Do not
-# apply that from this note: run `ldd` against the built binary, read the
-# sonames it actually names, and rewrite this list from that output.
+# Boost is not a runtime dependency: neither qbittorrent-nox nor
+# libtorrent-rasterbar names any Boost library in DT_NEEDED (measured from the
+# mod.2 image's DT_NEEDED entries).
 # qBittorrent keeps its resume data in SQLite through QSqlDatabase, so the
 # driver plugin is a runtime requirement, not an optional extra.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
-    libboost-system1.83.0 \
     zlib1g \
     libqt6core6t64 \
     libqt6network6 \

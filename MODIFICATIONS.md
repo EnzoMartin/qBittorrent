@@ -1,11 +1,5 @@
 # Modifications to qBittorrent
 
-> **MUST-VERIFY-BEFORE-SHIP: no build of this branch has produced a binary yet.**
-> The source structure this file describes is confirmed to exist — the deletions
-> are commits on this branch and can be read directly. What remains unverified is
-> that the modified tree *compiles* and that the resulting binary behaves as
-> claimed. Do not ship a binary from this branch until a build has succeeded.
-
 This file satisfies GPLv3 §5(a): the modified work must carry prominent notices
 stating that you modified it, and giving a relevant date.
 
@@ -184,8 +178,8 @@ git log --oneline release-5.2.4..HEAD
 git diff release-5.2.4..HEAD -- src/
 ```
 
-The source-side diff is seven files: 32 deletions across five existing files, and
-7 inserted lines across three existing files (`nativesessionextension.cpp`,
+The source-side diff is ten files: 32 deletions across five existing files, and
+9 inserted lines across three existing files (`nativesessionextension.cpp`,
 `sessionimpl.cpp`, `src/base/CMakeLists.txt`) plus two new files
 (`peerconnectionlog.h`, `peerconnectionlog.cpp`). Any insertion beyond §6's
 exact set contradicts the claim above.
